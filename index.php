@@ -1,5 +1,5 @@
 <?php
-require_once 'config/config.php';
+require_once __DIR__ . '/app/config/config.php';
 if (isset($_SESSION['usuario_id'])) {
     header("Location: dashboard.php");
     exit;

@@ -1,7 +1,7 @@
 <?php
-require_once 'config/config.php';
+require_once __DIR__ . '/app/config/config.php';
 auth();
-include 'header.php';
+include __DIR__ . '/app/includes/header.php';
 
 $operacion_id = $_SESSION['operacion_id'];
 if ($_SESSION['usuario_rol'] == 'normal') {

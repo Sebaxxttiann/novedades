@@ -1,5 +1,5 @@
 <?php
-require_once 'config/config.php';
+require_once __DIR__ . '/app/config/config.php';
 auth();
 if($_SESSION['usuario_rol'] !== 'admin') { header("Location: dashboard.php"); exit; }
 
@@ -24,7 +24,7 @@ if($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-include 'header.php';
+include __DIR__ . '/app/includes/header.php';
 ?>
 
 <style>

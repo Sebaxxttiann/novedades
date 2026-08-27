@@ -1,5 +1,5 @@
 <?php
-require_once 'config/config.php';
+require_once __DIR__ . '/app/config/config.php';
 date_default_timezone_set('America/Bogota'); // HORA COLOMBIA
 auth();
 
@@ -8,7 +8,7 @@ if($_SESSION['usuario_rol'] !== 'juridico' && $_SESSION['usuario_rol'] !== 'admi
     exit; 
 }
 
-include 'header.php';
+include __DIR__ . '/app/includes/header.php';
 
 // Cruzamos con la tabla operaciones para traer el nombre de la sede
 $stmt = $conn->prepare("
@@ -359,9 +359,9 @@ $fecha_minima = date('Y-m-d', strtotime('+5 days'));
         const formData = new FormData(e.target);
         
         try {
-            const res = await fetch('controllers/procesar_juridico.php', { method: 'POST', body: formData });
+            const res = await fetch('app/controllers/procesar_juridico.php', { method: 'POST', body: formData });
             const data = await res.json();
-            
+
             if(data.success) {
                 toggleModal('modalEjecutar', false);
                 showToast('Éxito', data.mensaje, 'success');
@@ -380,9 +380,9 @@ $fecha_minima = date('Y-m-d', strtotime('+5 days'));
         const formData = new FormData(e.target);
         
         try {
-            const res = await fetch('controllers/procesar_juridico.php', { method: 'POST', body: formData });
+            const res = await fetch('app/controllers/procesar_juridico.php', { method: 'POST', body: formData });
             const data = await res.json();
-            
+
             if(data.success) {
                 toggleModal('modalEstatus', false);
                 showToast('Actualizado', data.mensaje, 'success');
