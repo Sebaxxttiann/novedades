@@ -23,15 +23,16 @@ $menu = [
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <base href="<?= e(APP_BASE) ?>/">
     <meta name="csrf-token" content="<?= e(csrf_token()) ?>">
     <title><?= e($tituloPagina ?? 'Novedades') ?> | Sistema Disciplinario</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
-    <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/es.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" integrity="sha384-RkASv+6KfBMW9eknReJIJ6b3UnjKOKC5bOUaNgIY778NFbQ8MtWq9Lr/khUgqtTt" crossorigin="anonymous">
+    <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js" integrity="sha384-ieG+IKD0d/ZPXyCBTMVAbqsQdns8QGJR/e26WMw7M4fkaI/rHcS/YIoi+ah9WGge" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" integrity="sha384-5JqMv4L/Xa0hfvtF06qboNdhvuYXUku9ZrhZh3bSk8VXF0A/RuSLHpLsSV9Zqhl6" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/es.js" integrity="sha384-j/aEP2b+3OKmGqank2qCSosSrlrF9jpIpdgApXq2ryJYBpLSbEi63/PDdL+rKmcQ" crossorigin="anonymous"></script>
     <script>
         try { if (sessionStorage.getItem('actass_loader_visto')) document.documentElement.classList.add('sin-loader'); } catch (e) {}
     </script>
@@ -1167,7 +1168,7 @@ $menu = [
 <body>
 
     <div id="global-loader">
-        <video src="uploads/loading.webm" class="loader-video" autoplay loop muted playsinline></video>
+        <video src="assets/media/loading.webm" class="loader-video" autoplay loop muted playsinline></video>
         <div class="loader-text">Cargando sistema...</div>
     </div>
 
@@ -1195,10 +1196,13 @@ $menu = [
                     <div class="user-name"><?= e($_SESSION['usuario_nombre']) ?></div>
                     <div class="user-role"><?= e(ROLES[$rolActual] ?? $rolActual) ?></div>
                 </div>
-                <div class="avatar"><?= e(iniciales($_SESSION['usuario_nombre'])) ?></div>
-                <a href="logout.php" class="btn-icon danger" title="Cerrar sesión" aria-label="Cerrar sesión">
-                    <i data-lucide="log-out" style="width: 19px; height: 19px;"></i>
-                </a>
+                <a href="cambiar_password.php" class="avatar" title="Cambiar contraseña" aria-label="Cambiar contraseña" style="text-decoration: none;"><?= e(iniciales($_SESSION['usuario_nombre'])) ?></a>
+                <form method="post" action="logout.php" style="display: inline-flex;">
+                    <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                    <button type="submit" class="btn-icon danger" title="Cerrar sesión" aria-label="Cerrar sesión">
+                        <i data-lucide="log-out" style="width: 19px; height: 19px;"></i>
+                    </button>
+                </form>
             </div>
         </nav>
     <?php endif; ?>
@@ -1230,7 +1234,10 @@ $menu = [
                     </p>
                 </div>
                 <div class="modal-footer">
-                    <a href="logout.php" class="btn btn-ghost">Cerrar sesión</a>
+                    <form method="post" action="logout.php">
+                        <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                        <button type="submit" class="btn btn-ghost">Cerrar sesión</button>
+                    </form>
                     <button type="button" class="btn btn-primary" id="btnSeguirConectado">Seguir conectado</button>
                 </div>
             </div>
@@ -1350,7 +1357,7 @@ $menu = [
                 if (document.visibilityState === 'visible' && Date.now() - ultimaActividad() >= SESION_TIMEOUT_MS) sesionExpirada();
             });
             document.getElementById('btnSeguirConectado').addEventListener('click', async () => {
-                const res = await fetch('app/controllers/sesion.php');
+                const res = await fetch('api/sesion.php');
                 if (res.ok) showToast('Sesión extendida', 'Puede continuar trabajando.', 'success');
             });
         }
@@ -1388,9 +1395,7 @@ $menu = [
         }
 
         function escapeHtml(str) {
-            const div = document.createElement('div');
-            div.textContent = str ?? '';
-            return div.innerHTML;
+            return String(str ?? '').replace(/[&<>"'`]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c]));
         }
 
         function toggleModal(modalId, show) {
@@ -1656,7 +1661,7 @@ $menu = [
                 }
             });
 
-            raiz.querySelectorAll('[data-fecha]:not([data-listo])').forEach(cont => {
+            raiz.querySelectorAll('[data-fecha-picker]:not([data-listo])').forEach(cont => {
                 cont.dataset.listo = '1';
                 const visible = cont.querySelector('input[type="text"]');
                 const oculto = cont.querySelector('input[type="hidden"]');

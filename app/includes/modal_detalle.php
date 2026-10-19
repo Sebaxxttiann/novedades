@@ -69,7 +69,7 @@
 
         let data;
         try {
-            const res = await fetch('app/controllers/detalle_novedad.php?id=' + encodeURIComponent(id));
+            const res = await fetch('api/detalle_novedad.php?id=' + encodeURIComponent(id));
             data = await res.json();
         } catch (error) {
             data = { success: false, mensaje: 'No se pudo conectar con el servidor.' };

@@ -45,11 +45,6 @@ const ESTADOS = [
 const EVIDENCIA_EXTENSIONES = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'pdf'];
 const EVIDENCIA_MAX_BYTES = 10 * 1024 * 1024;
 
-define('APP_BASE', rtrim(str_replace('\\', '/', substr(
-    realpath(dirname(__DIR__, 2)),
-    strlen(realpath($_SERVER['DOCUMENT_ROOT'] ?? '') ?: '')
-)), '/'));
-
 function e($valor): string
 {
     return htmlspecialchars((string) $valor, ENT_QUOTES, 'UTF-8');
@@ -113,12 +108,12 @@ function sesion_activa(): bool
         return false;
     }
 
-    $stmt = $conn->prepare("SELECT u.nombre, u.rol, u.operacion_id, u.estado, o.nombre AS operacion_nombre
+    $stmt = $conn->prepare("SELECT u.nombre, u.rol, u.operacion_id, u.estado, u.debe_cambiar_password, u.password_actualizado_en, o.nombre AS operacion_nombre
         FROM usuarios u LEFT JOIN operaciones o ON o.id = u.operacion_id WHERE u.id = ?");
     $stmt->execute([$_SESSION['usuario_id']]);
     $usuario = $stmt->fetch();
 
-    if (!$usuario || (int) $usuario['estado'] !== 1) {
+    if (!$usuario || (int) $usuario['estado'] !== 1 || (string) $usuario['password_actualizado_en'] !== ($_SESSION['password_version'] ?? '')) {
         cerrar_sesion();
         return false;
     }
@@ -127,6 +122,7 @@ function sesion_activa(): bool
     $_SESSION['usuario_rol'] = $usuario['rol'];
     $_SESSION['operacion_id'] = $usuario['operacion_id'];
     $_SESSION['operacion_nombre'] = $usuario['operacion_nombre'] ?? 'Global';
+    $_SESSION['debe_cambiar_password'] = (int) $usuario['debe_cambiar_password'] === 1;
 
     return true;
 }
@@ -143,6 +139,13 @@ function auth(array $roles = []): void
     $_SESSION['ultimo_acceso'] = time();
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
+
+    if (!empty($_SESSION['debe_cambiar_password']) && basename($_SERVER['SCRIPT_NAME']) !== 'cambiar_password.php') {
+        if (es_ajax()) {
+            responder_json(['success' => false, 'mensaje' => 'Debe cambiar su contraseña antes de continuar.'], 403);
+        }
+        redirigir('cambiar_password.php');
+    }
 
     if ($roles && !in_array($_SESSION['usuario_rol'], $roles, true)) {
         if (es_ajax()) {
@@ -261,7 +264,7 @@ function guardar_evidencia(array $archivo): ?string
     }
 
     $nombre = bin2hex(random_bytes(16)) . '.' . $extension;
-    if (!move_uploaded_file($archivo['tmp_name'], dirname(__DIR__, 2) . '/uploads/' . $nombre)) {
+    if (!move_uploaded_file($archivo['tmp_name'], STORAGE_PATH . '/evidencias/' . $nombre)) {
         throw new RuntimeException('No se pudo guardar la evidencia.');
     }
     return $nombre;
@@ -289,4 +292,13 @@ function obtener_reporte_autorizado(int $id): ?array
         || ($rol === 'juridico' && $reporte['decision'] === 'proceso_disciplinario');
 
     return $permitido ? $reporte : null;
+}
+
+function limite_citacion(?string $fechaCitacion, ?string $citadoEn): ?string
+{
+    if (!$fechaCitacion) {
+        return null;
+    }
+    $hora = $citadoEn ? date('H:i:s', strtotime($citadoEn)) : '00:00:00';
+    return $fechaCitacion . 'T' . $hora . '-05:00';
 }

@@ -3,9 +3,17 @@ ServerSignature Off
 
 <IfModule mod_rewrite.c>
     RewriteEngine On
-    RewriteRule ^(app/(config|includes)|templates|vendor|_legacy|database|plantillas|\.git)(/|$) - [F,L]
+    RewriteRule ^$ public/ [L]
+    RewriteCond %{REQUEST_URI} !/public/
+    RewriteRule ^(.*)$ public/$1 [L]
 </IfModule>
 
-<FilesMatch "^(composer\.(json|lock)|\.gitignore|\.htaccess|.*\.(sql|md|log|env))$">
+<IfModule !mod_rewrite.c>
+    <FilesMatch ".*">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+
+<FilesMatch "^(composer\.(json|lock)|README\.md|\.gitignore)$">
     Require all denied
 </FilesMatch>

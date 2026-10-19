@@ -3,15 +3,22 @@ date_default_timezone_set('America/Bogota');
 
 const SESSION_TIMEOUT = 1800;
 
+define('ROOT_PATH', dirname(__DIR__, 2));
+define('STORAGE_PATH', ROOT_PATH . '/storage');
+define('APP_BASE', rtrim(str_replace('\\', '/', substr(
+    realpath(ROOT_PATH),
+    strlen(realpath($_SERVER['DOCUMENT_ROOT'] ?? '') ?: '')
+)), '/'));
+
 ini_set('session.use_strict_mode', '1');
 ini_set('session.use_only_cookies', '1');
 ini_set('session.gc_maxlifetime', (string) (SESSION_TIMEOUT + 600));
 
 if (session_status() === PHP_SESSION_NONE) {
-    session_name('ACTASSID');
+    session_name('NOVEDADES_SID');
     session_set_cookie_params([
         'lifetime' => 0,
-        'path' => '/',
+        'path' => APP_BASE . '/',
         'httponly' => true,
         'samesite' => 'Lax',
         'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
@@ -19,10 +26,12 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+header_remove('X-Powered-By');
 header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: same-origin');
 header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+header("Content-Security-Policy: object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
 
 try {
     $conn = new PDO(
