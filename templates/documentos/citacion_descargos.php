@@ -1,9 +1,3 @@
-<?php
-/**
- * Carta de citación a diligencia de descargos.
- * Requiere en scope: $nombre, $cedula, $fecha_actual, $fecha_ejecucion
- */
-?>
 <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
 <head><meta charset="utf-8"><title>Citación a Descargos</title></head>
 <body style="font-family: Arial, sans-serif; line-height: 1.6;">
@@ -13,7 +7,7 @@
         <p style="margin: 0; color: #555;"><strong>Departamento Jurídico y Gestión Humana</strong></p>
     </div>
 
-    <p><strong>Fecha de Emisión:</strong> <?= $fecha_actual ?></p>
+    <p><strong>Fecha de Emisión:</strong> <?= $fechaActual ?></p>
     <p><strong>Señor(a):</strong> <?= $nombre ?></p>
     <p><strong>Cédula de Ciudadanía:</strong> <?= $cedula ?></p>
 
@@ -30,7 +24,7 @@
     </p>
 
     <div style="background-color: #f4f4f4; border: 1px solid #ccc; padding: 15px; text-align: center; margin: 20px 0;">
-        <h3 style="margin: 0; color: #b91c1c;">FECHA DE DILIGENCIA: <?= date('d/m/Y', strtotime($fecha_ejecucion)) ?></h3>
+        <h3 style="margin: 0; color: #b91c1c;">FECHA DE DILIGENCIA: <?= date('d/m/Y', strtotime($fechaEjecucion)) ?></h3>
     </div>
 
     <p style="text-align: justify;">

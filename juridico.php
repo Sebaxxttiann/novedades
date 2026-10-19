@@ -1,69 +1,85 @@
 <?php
 require_once __DIR__ . '/app/config/config.php';
-date_default_timezone_set('America/Bogota'); // HORA COLOMBIA
-auth();
+auth(['juridico']);
 
-if($_SESSION['usuario_rol'] !== 'juridico' && $_SESSION['usuario_rol'] !== 'admin') { 
-    header("Location: dashboard.php"); 
-    exit; 
+$estadosFiltro = array_merge(['registrado', 'citado'], array_keys(ESTADOS_CIERRE));
+
+$q = filtro_get('q');
+$estadoFiltro = filtro_get('estado', $estadosFiltro);
+$operacionFiltro = filtro_get_int('operacion');
+$desde = filtro_get_fecha('desde');
+$hasta = filtro_get_fecha('hasta');
+
+$condiciones = ["r.decision = 'proceso_disciplinario'"];
+$parametros = [];
+
+if ($q !== '') {
+    $like = '%' . addcslashes($q, '%_\\') . '%';
+    $condiciones[] = '(r.colaborador_nombre LIKE ? OR r.colaborador_cedula LIKE ?)';
+    array_push($parametros, $like, $like);
+}
+if ($operacionFiltro > 0) {
+    $condiciones[] = 'r.operacion_id = ?';
+    $parametros[] = $operacionFiltro;
+}
+if ($desde !== '') {
+    $condiciones[] = 'DATE(r.fecha_creacion) >= ?';
+    $parametros[] = $desde;
+}
+if ($hasta !== '') {
+    $condiciones[] = 'DATE(r.fecha_creacion) <= ?';
+    $parametros[] = $hasta;
 }
 
-include __DIR__ . '/app/includes/header.php';
+$whereBase = implode(' AND ', $condiciones);
 
-// Cruzamos con la tabla operaciones para traer el nombre de la sede
-$stmt = $conn->prepare("
-    SELECT r.*, o.nombre as operacion_nombre 
-    FROM reportes_novedades r 
-    LEFT JOIN operaciones o ON r.operacion_id = o.id 
-    WHERE r.decision = 'proceso_disciplinario' 
-    ORDER BY r.id DESC
-");
-$stmt->execute();
+$stmt = $conn->prepare("SELECT COUNT(*) AS total,
+        COALESCE(SUM(r.estado = 'registrado'), 0) AS pendientes,
+        COALESCE(SUM(r.estado = 'citado'), 0) AS citados
+    FROM reportes_novedades r WHERE $whereBase");
+$stmt->execute($parametros);
+$kpi = $stmt->fetch();
+$kpiTotal = (int) $kpi['total'];
+$kpiPendientes = (int) $kpi['pendientes'];
+$kpiCitados = (int) $kpi['citados'];
+$kpiCerrados = $kpiTotal - $kpiPendientes - $kpiCitados;
+
+$whereLista = $whereBase;
+$parametrosLista = $parametros;
+if ($estadoFiltro !== '') {
+    $whereLista .= ' AND r.estado = ?';
+    $parametrosLista[] = $estadoFiltro;
+}
+
+$stmt = $conn->prepare("SELECT r.id, r.colaborador_nombre, r.colaborador_cedula, r.tipo_infraccion, r.falta_grave,
+        r.estado, r.fecha_citacion, r.fecha_creacion, o.nombre AS operacion_nombre
+    FROM reportes_novedades r
+    LEFT JOIN operaciones o ON r.operacion_id = o.id
+    WHERE $whereLista
+    ORDER BY r.id DESC");
+$stmt->execute($parametrosLista);
 $reportes = $stmt->fetchAll();
 
-// Fecha mínima permitida (Hoy + 5 días)
-$fecha_minima = date('Y-m-d', strtotime('+5 days'));
+$operaciones = $conn->query("SELECT id, nombre FROM operaciones ORDER BY nombre")->fetchAll();
+
+$fechaMinima = date('Y-m-d', strtotime('+5 days'));
+
+$tituloPagina = 'Panel Jurídico';
+include __DIR__ . '/app/includes/header.php';
 ?>
 
 <style>
-    /* Estilos Enterprise */
-    .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
-    .page-title h1 { font-size: 1.6rem; font-weight: 600; color: var(--text-main); letter-spacing: -0.5px; }
-    .page-title p { color: var(--text-muted); font-size: 0.9rem; margin-top: 2px; }
-
-    .table-card { background: var(--surface); border-radius: 12px; border: 1px solid var(--border); box-shadow: var(--shadow-sm); overflow: hidden; width: 100%; }
-    .custom-table { width: 100%; border-collapse: collapse; text-align: left; }
-    .custom-table th { background: #f8fafc; padding: 1rem 1.2rem; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); border-bottom: 1px solid var(--border); }
-    .custom-table td { padding: 1rem 1.2rem; border-bottom: 1px solid var(--border); font-size: 0.95rem; vertical-align: middle; }
-    .custom-table tbody tr:hover { background-color: #f8fafc; }
-
-    .user-info { display: flex; align-items: center; gap: 12px; }
-    .avatar-circle { width: 40px; height: 40px; border-radius: 50%; background: #e2e8f0; color: var(--text-main); font-weight: 600; font-size: 0.9rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-    .user-details strong { color: var(--text-main); font-weight: 600; display: block; }
-    .user-details span { color: var(--text-muted); font-size: 0.8rem; font-family: monospace; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; margin-top: 4px; display: inline-block; }
-
-    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 0.35rem 0.75rem; border-radius: 20px; font-size: 0.75rem; font-weight: 600; text-transform: capitalize; }
-    .badge-registrado { background: #fef2f2; color: #b91c1c; border: 1px solid #fee2e2; }
-    .badge-citado { background: #eff6ff; color: #1d4ed8; border: 1px solid #dbeafe; }
-    .badge-cerrado { background: #f0fdf4; color: #15803d; border: 1px solid #dcfce3; }
-    .badge-op { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; font-size: 0.7rem; padding: 2px 6px; }
-
-    .action-btn { background: white; border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; cursor: pointer; color: var(--text-main); font-weight: 500; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 4px; transition: 0.2s; }
-    .action-btn:hover { background: #f1f5f9; border-color: #cbd5e1; }
-    .btn-exec { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
-    .btn-exec:hover { background: #dbeafe; }
-    
-    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem; }
-    .detail-item { background: #f8fafc; padding: 1rem; border-radius: 8px; border: 1px solid var(--border); }
-    .detail-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-bottom: 4px; }
-    .detail-value { font-size: 0.95rem; color: var(--text-main); font-weight: 500; }
-    
-    /* Contador CSS */
-    .countdown-timer { margin-top: 8px; font-size: 0.75rem; font-family: monospace; font-weight: 600; color: #c2410c; background: #fff7ed; padding: 4px 8px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid #ffedd5; }
+    .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-bottom: 1rem; }
+    .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem 1rem; box-shadow: var(--shadow-sm); }
+    .kpi-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+    .kpi-value { font-size: 1.5rem; font-weight: 600; color: var(--text-main); line-height: 1.3; }
+    .countdown-timer { margin-top: 6px; font-size: 0.74rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; color: #c2410c; background: #fff7ed; padding: 3px 8px; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid #ffedd5; }
+    .countdown-timer svg { width: 12px; height: 12px; }
     .countdown-timer.expired { color: #15803d; background: #f0fdf4; border-color: #dcfce3; }
+    @media (max-width: 720px) { .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>
 
-<div class="container">
+<main class="container">
     <div class="page-header">
         <div class="page-title">
             <h1>Panel Jurídico</h1>
@@ -71,327 +87,339 @@ $fecha_minima = date('Y-m-d', strtotime('+5 days'));
         </div>
     </div>
 
-    <div class="table-card">
-        <table class="custom-table">
-            <thead>
-                <tr>
-                    <th>Infractor / Sede</th>
-                    <th>Infracción / Gravedad</th>
-                    <th>Estatus Actual</th>
-                    <th style="text-align: right;">Acciones</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach($reportes as $r): 
-                    $iniciales = strtoupper(substr($r['colaborador_nombre'], 0, 2));
-                    
-                    $estadoClass = 'badge-registrado';
-                    $estadoIcon = 'clock';
-                    if($r['estado'] === 'citado') { $estadoClass = 'badge-citado'; $estadoIcon = 'calendar-check'; }
-                    elseif($r['estado'] !== 'registrado') { $estadoClass = 'badge-cerrado'; $estadoIcon = 'check-circle'; }
-                ?>
-                <tr>
-                    <td>
-                        <div class="user-info">
-                            <div class="avatar-circle"><?= $iniciales ?></div>
-                            <div class="user-details">
-                                <strong><?= htmlspecialchars($r['colaborador_nombre']) ?></strong>
-                                <span>CC: <?= htmlspecialchars($r['colaborador_cedula']) ?></span>
-                                <span class="badge-op"><i data-lucide="map-pin" style="width: 10px;"></i> <?= htmlspecialchars($r['operacion_nombre'] ?? 'Global') ?></span>
-                            </div>
-                        </div>
-                    </td>
-                    <td>
-                        <div style="font-size: 0.9rem; text-transform: capitalize; font-weight: 500;"><?= str_replace('_', ' ', $r['tipo_infraccion']) ?></div>
-                        <?php if($r['falta_grave']): ?>
-                            <span style="font-size: 0.7rem; background: #fee2e2; color: #b91c1c; padding: 2px 6px; border-radius: 4px; margin-top: 4px; display: inline-block;">Falta Grave</span>
-                        <?php endif; ?>
-                    </td>
-                    <td>
-                        <span class="badge <?= $estadoClass ?>">
-                            <i data-lucide="<?= $estadoIcon ?>" style="width: 14px; height: 14px;"></i>
-                            <?= str_replace('_', ' ', $r['estado']) ?>
-                        </span>
-                        
-                        <!-- Si el estado es citado y hay fecha, mostramos el contador -->
-                        <?php if($r['estado'] === 'citado' && !empty($r['fecha_citacion'])): ?>
-                            <br>
-                            <!-- Se envía la fecha con zona horaria de Colombia UTC-5 -->
-                            <div class="countdown-timer" data-fecha="<?= $r['fecha_citacion'] ?>T08:00:00-05:00">
-                                <i data-lucide="timer" style="width: 12px; height: 12px;"></i> Calculando...
-                            </div>
-                        <?php endif; ?>
-                    </td>
-                    <td style="text-align: right;">
-                        <div style="display: flex; gap: 8px; justify-content: flex-end;">
-                            <button class="action-btn" onclick="abrirModalVer(<?= htmlspecialchars(json_encode($r), ENT_QUOTES, 'UTF-8') ?>)">
-                                <i data-lucide="eye" style="width: 14px;"></i> Ver
-                            </button>
-                            
-                            <!-- SOLO MUESTRA EL BOTÓN DE FECHA SI AÚN NO HA SIDO CITADO -->
-                            <?php if(empty($r['fecha_citacion']) || $r['estado'] === 'registrado'): ?>
-                                <button class="action-btn btn-exec" onclick="abrirModalEjecutar(<?= $r['id'] ?>, '<?= htmlspecialchars($r['colaborador_nombre']) ?>', '<?= htmlspecialchars($r['colaborador_cedula']) ?>')">
-                                    <i data-lucide="calendar" style="width: 14px;"></i> Fecha
-                                </button>
-                            <?php endif; ?>
-                            
-                            <button class="action-btn" onclick="abrirModalEstatus(<?= $r['id'] ?>)">
-                                <i data-lucide="activity" style="width: 14px;"></i> Cierre
-                            </button>
-                        </div>
-                    </td>
-                </tr>
+    <div class="kpi-grid" id="kpisJuridico">
+        <div class="kpi"><div class="kpi-label">Pendientes</div><div class="kpi-value" id="kpiPendientes"><?= $kpiPendientes ?></div></div>
+        <div class="kpi"><div class="kpi-label">Citados</div><div class="kpi-value" id="kpiCitados"><?= $kpiCitados ?></div></div>
+        <div class="kpi"><div class="kpi-label">Cerrados</div><div class="kpi-value" id="kpiCerrados"><?= $kpiCerrados ?></div></div>
+        <div class="kpi"><div class="kpi-label">Total</div><div class="kpi-value" id="kpiTotal"><?= $kpiTotal ?></div></div>
+    </div>
+
+    <form class="filters-bar" id="formFiltrosJuridico" method="get">
+        <div class="filter-field grow">
+            <label for="filtroQ">Buscar</label>
+            <div class="search-input">
+                <i data-lucide="search"></i>
+                <input type="search" id="filtroQ" name="q" class="form-control" placeholder="Nombre o cédula" value="<?= e($q) ?>">
+            </div>
+        </div>
+        <div class="filter-field">
+            <label for="filtroEstado">Estado</label>
+            <select id="filtroEstado" name="estado" class="form-control">
+                <option value="">Todos</option>
+                <?php foreach ($estadosFiltro as $clave): ?>
+                    <option value="<?= e($clave) ?>" <?= $estadoFiltro === $clave ? 'selected' : '' ?>><?= e(estado_info($clave)['label']) ?></option>
                 <?php endforeach; ?>
-            </tbody>
-        </table>
+            </select>
+        </div>
+        <div class="filter-field">
+            <label for="filtroOperacion">Operación</label>
+            <select id="filtroOperacion" name="operacion" class="form-control">
+                <option value="">Todas</option>
+                <?php foreach ($operaciones as $op): ?>
+                    <option value="<?= (int) $op['id'] ?>" <?= $operacionFiltro === (int) $op['id'] ? 'selected' : '' ?>><?= e($op['nombre']) ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="filter-field" style="min-width: 240px;">
+            <label>Rango de fechas</label>
+            <div class="date-picker" data-rango-fechas>
+                <i data-lucide="calendar-range"></i>
+                <input type="text" class="form-control" placeholder="Seleccione un rango" readonly>
+                <input type="hidden" name="desde" value="<?= e($desde) ?>">
+                <input type="hidden" name="hasta" value="<?= e($hasta) ?>">
+                <button type="button" class="date-clear" aria-label="Quitar fechas"><i data-lucide="x"></i></button>
+            </div>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" data-filtro-limpiar><i data-lucide="x"></i> Limpiar</button>
+    </form>
+
+    <div class="table-card" id="tarjetaJuridico">
+        <div class="table-scroll">
+            <table class="custom-table" id="tablaJuridico">
+                <thead>
+                    <tr>
+                        <th>Colaborador</th>
+                        <th>Infracción / Gravedad</th>
+                        <th>Estado</th>
+                        <th class="nowrap">Fecha registro</th>
+                        <th class="col-actions">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php if (!$reportes): ?>
+                        <tr data-no-paginate="true">
+                            <td colspan="5">
+                                <div class="empty-state">
+                                    <i data-lucide="gavel"></i>
+                                    <h3>Sin procesos disciplinarios</h3>
+                                    <p>No hay resultados con los filtros aplicados.</p>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
+                    <?php foreach ($reportes as $r):
+                        $info = estado_info($r['estado']);
+                        $cerrado = isset(ESTADOS_CIERRE[$r['estado']]);
+                    ?>
+                        <tr data-id="<?= (int) $r['id'] ?>" data-estado="<?= e($r['estado']) ?>" data-nombre="<?= e($r['colaborador_nombre']) ?>">
+                            <td>
+                                <div class="cell-person">
+                                    <div class="avatar avatar-lg avatar-primary"><?= e(iniciales($r['colaborador_nombre'])) ?></div>
+                                    <div>
+                                        <strong><?= e($r['colaborador_nombre']) ?></strong>
+                                        <span>CC: <?= e($r['colaborador_cedula']) ?></span>
+                                        <span class="badge tone-slate" style="display: inline-flex; margin-top: 4px;"><i data-lucide="map-pin"></i> <?= e($r['operacion_nombre'] ?? 'Global') ?></span>
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <div><?= e(TIPOS_INFRACCION[$r['tipo_infraccion']] ?? $r['tipo_infraccion']) ?></div>
+                                <?php if ($r['falta_grave']): ?>
+                                    <span class="badge tone-red">Falta grave</span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="celda-estado">
+                                <span class="badge tone-<?= e($info['tone']) ?>"><i data-lucide="<?= e($info['icon']) ?>"></i> <?= e($info['label']) ?></span>
+                                <?php if ($r['estado'] === 'citado' && !empty($r['fecha_citacion'])): ?>
+                                    <div><span class="countdown-timer" data-fecha="<?= e($r['fecha_citacion']) ?>T08:00:00-05:00"><i data-lucide="timer"></i><span class="countdown-texto">Calculando...</span></span></div>
+                                <?php endif; ?>
+                            </td>
+                            <td class="nowrap"><span class="date-cell"><i data-lucide="calendar"></i> <?= e(date('d/m/Y', strtotime($r['fecha_creacion']))) ?></span></td>
+                            <td class="col-actions celda-acciones">
+                                <div class="row-actions">
+                                    <button type="button" class="btn btn-outline btn-sm" data-ver="<?= (int) $r['id'] ?>"><i data-lucide="eye"></i> Ver</button>
+                                    <?php if ($r['estado'] === 'registrado'): ?>
+                                        <button type="button" class="btn btn-outline btn-sm" data-agendar="<?= (int) $r['id'] ?>"><i data-lucide="calendar"></i> Agendar fecha</button>
+                                    <?php endif; ?>
+                                    <?php if (!$cerrado): ?>
+                                        <button type="button" class="btn btn-outline btn-sm" data-cierre="<?= (int) $r['id'] ?>"><i data-lucide="activity"></i> Cierre</button>
+                                    <?php endif; ?>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
     </div>
-</div>
+</main>
 
-<!-- Modal 0: Ver Detalles -->
-<div class="modal-overlay" id="modalVer">
-    <div class="modal-content" style="max-width: 650px;">
-        <div class="modal-header">
-            <h2>Expediente del Proceso</h2>
-            <button type="button" class="close-modal" onclick="toggleModal('modalVer', false)"><i data-lucide="x"></i></button>
-        </div>
-        <div class="modal-body">
-            <div class="detail-grid">
-                <div class="detail-item">
-                    <div class="detail-label">Colaborador Involucrado</div>
-                    <div class="detail-value" id="ver_nombre"></div>
-                    <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">CC: <span id="ver_cedula"></span></div>
-                </div>
-                <div class="detail-item">
-                    <div class="detail-label">Sede / Operación</div>
-                    <div class="detail-value" style="display: flex; align-items: center; gap: 6px;">
-                        <i data-lucide="map-pin" style="width: 16px; color: var(--primary);"></i>
-                        <span id="ver_operacion"></span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="detail-grid" style="margin-bottom: 1rem;">
-                <div class="detail-item">
-                    <div class="detail-label">Tipo de Infracción</div>
-                    <div class="detail-value" id="ver_infraccion" style="text-transform: capitalize;"></div>
-                </div>
-                <div class="detail-item">
-                    <div class="detail-label">Evaluación Preliminar</div>
-                    <div class="detail-value" style="display: flex; gap: 8px;">
-                        <span id="badge_reincidente" style="font-size: 0.75rem; padding: 2px 6px; border-radius: 4px;"></span>
-                        <span id="badge_gravedad" style="font-size: 0.75rem; padding: 2px 6px; border-radius: 4px;"></span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="detail-item" style="margin-bottom: 1.5rem;">
-                <div class="detail-label">Observación / Descripción de los Hechos</div>
-                <div class="detail-value" id="ver_descripcion" style="margin-top: 8px; line-height: 1.5; font-size: 0.9rem; white-space: pre-wrap;"></div>
-            </div>
-
-            <div id="contenedor_evidencia" style="display: none; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 1rem; border-radius: 8px; align-items: center; justify-content: space-between;">
-                <div style="display: flex; align-items: center; gap: 10px; color: #15803d;">
-                    <i data-lucide="paperclip"></i>
-                    <span style="font-weight: 500; font-size: 0.9rem;">Evidencia Adjunta Disponible</span>
-                </div>
-                <a id="ver_evidencia" href="#" target="_blank" class="btn btn-primary" style="background: #166534; padding: 0.4rem 0.8rem; font-size: 0.8rem;">
-                    Ver Archivo
-                </a>
-            </div>
-        </div>
-        <div class="modal-footer">
-            <button type="button" class="btn btn-outline" onclick="toggleModal('modalVer', false)">Cerrar Expediente</button>
-        </div>
-    </div>
-</div>
-
-<!-- Modal 1: Ejecutar Proceso (Agendar Fecha) -->
 <div class="modal-overlay" id="modalEjecutar">
     <div class="modal-content" style="max-width: 450px;">
         <form id="formEjecutar">
             <div class="modal-header">
-                <h2>Ejecutar Proceso</h2>
-                <button type="button" class="close-modal" onclick="toggleModal('modalEjecutar', false)"><i data-lucide="x"></i></button>
+                <h2>Agendar descargos</h2>
+                <button type="button" class="close-modal" data-cerrar-modal="modalEjecutar" aria-label="Cerrar"><i data-lucide="x"></i></button>
             </div>
             <div class="modal-body">
-                <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">
-                    Agende la diligencia de descargos para <strong><span id="txtNombreEjecutar"></span></strong>.
+                <p class="muted" style="font-size: 0.9rem; margin-bottom: 1rem;">
+                    Agende la diligencia de descargos para <strong id="txtNombreEjecutar"></strong>.
                 </p>
                 <input type="hidden" name="reporte_id" id="exec_reporte_id">
-                <input type="hidden" name="colaborador_nombre" id="exec_nombre">
-                <input type="hidden" name="colaborador_cedula" id="exec_cedula">
                 <input type="hidden" name="accion" value="ejecutar_fecha">
-
                 <div class="form-group">
-                    <label class="form-label">Fecha de Citación a Descargos</label>
-                    <input type="date" name="fecha_citacion" class="form-control" min="<?= $fecha_minima ?>" required>
-                    <div style="display: flex; gap: 8px; margin-top: 8px; color: #0369a1; background: #f0f9ff; padding: 8px; border-radius: 6px;">
-                        <i data-lucide="info" style="width: 16px; flex-shrink: 0;"></i>
-                        <p style="font-size: 0.8rem; margin: 0;">Por ley, la fecha seleccionada no puede ser menor a 5 días a partir de hoy.</p>
+                    <label class="form-label" for="exec_fecha">Fecha de citación a descargos</label>
+                    <div class="date-picker" data-fecha data-min="<?= e($fechaMinima) ?>" id="exec_fecha_picker">
+                        <i data-lucide="calendar"></i>
+                        <input type="text" id="exec_fecha" class="form-control" placeholder="Seleccione la fecha" readonly>
+                        <input type="hidden" name="fecha_citacion" id="exec_fecha_valor">
                     </div>
+                    <div class="info-text"><i data-lucide="info"></i><span>La fecha no puede ser menor a 5 días a partir de hoy.</span></div>
                 </div>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-outline" onclick="toggleModal('modalEjecutar', false)">Cancelar</button>
-                <button type="submit" class="btn btn-primary">Confirmar y Generar Plantilla</button>
+                <button type="button" class="btn btn-outline" data-cerrar-modal="modalEjecutar">Cancelar</button>
+                <button type="submit" class="btn btn-primary">Confirmar y generar citación</button>
             </div>
         </form>
     </div>
 </div>
 
-<!-- Modal 2: Actualizar Estatus de Cierre -->
 <div class="modal-overlay" id="modalEstatus">
     <div class="modal-content" style="max-width: 450px;">
         <form id="formEstatus">
             <div class="modal-header">
-                <h2>Actualizar Estatus</h2>
-                <button type="button" class="close-modal" onclick="toggleModal('modalEstatus', false)"><i data-lucide="x"></i></button>
+                <h2>Cierre del proceso</h2>
+                <button type="button" class="close-modal" data-cerrar-modal="modalEstatus" aria-label="Cerrar"><i data-lucide="x"></i></button>
             </div>
             <div class="modal-body">
                 <input type="hidden" name="reporte_id" id="estatus_reporte_id">
                 <input type="hidden" name="accion" value="actualizar_estatus">
-
                 <div class="form-group">
-                    <label class="form-label">Decisión Final / Estatus</label>
-                    <select name="nuevo_estatus" class="form-control" required>
+                    <label class="form-label" for="estatus_select">Decisión final</label>
+                    <select id="estatus_select" name="nuevo_estatus" class="form-control" required>
                         <option value="">Seleccione el resultado...</option>
-                        <option value="llamado_atencion_escrito">Llamado de atención escrito</option>
-                        <option value="suspension_dias">Suspensión de días</option>
-                        <option value="terminacion_contrato">Terminación de contrato</option>
-                        <option value="archivado_sin_merito">Archivado (Sin mérito)</option>
+                        <?php foreach (ESTADOS_CIERRE as $clave => $etiqueta): ?>
+                            <option value="<?= e($clave) ?>"><?= e($etiqueta) ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </div>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-outline" onclick="toggleModal('modalEstatus', false)">Cancelar</button>
-                <button type="submit" class="btn btn-primary" style="background: #15803d;">Guardar Estatus</button>
+                <button type="button" class="btn btn-outline" data-cerrar-modal="modalEstatus">Cancelar</button>
+                <button type="submit" class="btn btn-primary">Guardar estatus</button>
             </div>
         </form>
     </div>
 </div>
 
 <script>
-    lucide.createIcons();
+    const URL_PROCESAR = 'app/controllers/procesar_juridico.php';
+    const ESTADOS_CERRADOS = <?= json_encode(array_keys(ESTADOS_CIERRE)) ?>;
 
-    // Motor del Contador en Tiempo Real (Hora Colombia)
     function actualizarContadores() {
-        const contadores = document.querySelectorAll('.countdown-timer');
-        const ahora = new Date().getTime(); // Hora local del dispositivo del usuario
-        
-        contadores.forEach(cont => {
-            const fechaDestinoStr = cont.getAttribute('data-fecha');
-            if(!fechaDestinoStr) return;
-            
-            const fechaDestino = new Date(fechaDestinoStr).getTime();
-            const distancia = fechaDestino - ahora;
-            
+        const ahora = Date.now();
+        document.querySelectorAll('.countdown-timer').forEach(cont => {
+            const destino = new Date(cont.dataset.fecha).getTime();
+            const texto = cont.querySelector('.countdown-texto');
+            if (!texto || isNaN(destino)) return;
+            const distancia = destino - ahora;
             if (distancia < 0) {
-                cont.innerHTML = `<i data-lucide="check-circle" style="width: 12px; height: 12px;"></i> Diligencia en proceso/cumplida`;
+                texto.textContent = 'Diligencia en proceso o cumplida';
                 cont.classList.add('expired');
-            } else {
-                const dias = Math.floor(distancia / (1000 * 60 * 60 * 24));
-                const horas = Math.floor((distancia % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-                const minutos = Math.floor((distancia % (1000 * 60 * 60)) / (1000 * 60));
-                const segundos = Math.floor((distancia % (1000 * 60)) / 1000);
-                
-                cont.innerHTML = `<i data-lucide="timer" style="width: 12px; height: 12px;"></i> Faltan: ${dias}d ${horas}h ${minutos}m ${segundos}s`;
+                return;
             }
+            cont.classList.remove('expired');
+            const dias = Math.floor(distancia / 86400000);
+            const horas = Math.floor((distancia % 86400000) / 3600000);
+            const minutos = Math.floor((distancia % 3600000) / 60000);
+            const segundos = Math.floor((distancia % 60000) / 1000);
+            texto.textContent = `Faltan: ${dias}d ${horas}h ${minutos}m ${segundos}s`;
         });
-        // Refrescar los íconos inyectados
-        lucide.createIcons();
     }
-    // Inicializar el reloj cada segundo
-    setInterval(actualizarContadores, 1000);
-    actualizarContadores();
 
-    function abrirModalVer(data) {
-        document.getElementById('ver_nombre').textContent = data.colaborador_nombre;
-        document.getElementById('ver_cedula').textContent = data.colaborador_cedula;
-        document.getElementById('ver_operacion').textContent = data.operacion_nombre || 'Global';
-        document.getElementById('ver_infraccion').textContent = data.tipo_infraccion.replace('_', ' ');
-        document.getElementById('ver_descripcion').textContent = data.descripcion;
+    function actualizarKpis() {
+        const filas = Array.from(document.querySelectorAll('#tablaJuridico tbody tr[data-id]'));
+        const pendientes = filas.filter(f => f.dataset.estado === 'registrado').length;
+        const citados = filas.filter(f => f.dataset.estado === 'citado').length;
+        document.getElementById('kpiPendientes').textContent = pendientes;
+        document.getElementById('kpiCitados').textContent = citados;
+        document.getElementById('kpiCerrados').textContent = filas.length - pendientes - citados;
+        document.getElementById('kpiTotal').textContent = filas.length;
+    }
 
-        const bReincidente = document.getElementById('badge_reincidente');
-        if(data.reincidente == 1) {
-            bReincidente.textContent = 'Reincidente';
-            bReincidente.style.background = '#fef3c7'; bReincidente.style.color = '#92400e';
-        } else {
-            bReincidente.textContent = '1ra Vez';
-            bReincidente.style.background = '#f3f4f6'; bReincidente.style.color = '#4b5563';
+    function refrescarTabla() {
+        initPagination('tablaJuridico', { perPage: 10 });
+        actualizarContadores();
+    }
+
+    function actualizarFila(datos) {
+        const fila = document.querySelector(`#tablaJuridico tbody tr[data-id="${datos.id}"]`);
+        if (!fila) return;
+        fila.dataset.estado = datos.estado;
+
+        let html = `<span class="badge tone-${escapeHtml(datos.estado_tone)}"><i data-lucide="${escapeHtml(datos.estado_icon)}"></i> ${escapeHtml(datos.estado_label)}</span>`;
+        if (datos.estado === 'citado' && datos.fecha_citacion) {
+            html += `<div><span class="countdown-timer" data-fecha="${escapeHtml(datos.fecha_citacion)}T08:00:00-05:00"><i data-lucide="timer"></i><span class="countdown-texto">Calculando...</span></span></div>`;
+        }
+        fila.querySelector('.celda-estado').innerHTML = html;
+
+        let acciones = `<button type="button" class="btn btn-outline btn-sm" data-ver="${datos.id}"><i data-lucide="eye"></i> Ver</button>`;
+        if (datos.estado === 'registrado') {
+            acciones += `<button type="button" class="btn btn-outline btn-sm" data-agendar="${datos.id}"><i data-lucide="calendar"></i> Agendar fecha</button>`;
+        }
+        if (!ESTADOS_CERRADOS.includes(datos.estado)) {
+            acciones += `<button type="button" class="btn btn-outline btn-sm" data-cierre="${datos.id}"><i data-lucide="activity"></i> Cierre</button>`;
+        }
+        fila.querySelector('.celda-acciones').innerHTML = `<div class="row-actions">${acciones}</div>`;
+
+        lucide.createIcons({ nodes: [fila] });
+        actualizarContadores();
+        actualizarKpis();
+    }
+
+    document.addEventListener('click', (e) => {
+        const cerrar = e.target.closest('[data-cerrar-modal]');
+        if (cerrar) {
+            toggleModal(cerrar.dataset.cerrarModal, false);
+            return;
         }
 
-        const bGravedad = document.getElementById('badge_gravedad');
-        if(data.falta_grave == 1) {
-            bGravedad.textContent = 'Falta Grave';
-            bGravedad.style.background = '#fee2e2'; bGravedad.style.color = '#b91c1c';
-        } else {
-            bGravedad.textContent = 'Falta Leve/Moderada';
-            bGravedad.style.background = '#f3f4f6'; bGravedad.style.color = '#4b5563';
+        const ver = e.target.closest('[data-ver]');
+        if (ver) {
+            verDetalleNovedad(parseInt(ver.dataset.ver, 10));
+            return;
         }
 
-        const contEvidencia = document.getElementById('contenedor_evidencia');
-        const linkEvidencia = document.getElementById('ver_evidencia');
-        if(data.evidencia) {
-            linkEvidencia.href = 'uploads/' + data.evidencia;
-            contEvidencia.style.display = 'flex';
-        } else {
-            contEvidencia.style.display = 'none';
+        const agendar = e.target.closest('[data-agendar]');
+        if (agendar) {
+            const fila = agendar.closest('tr');
+            document.getElementById('exec_reporte_id').value = agendar.dataset.agendar;
+            document.getElementById('txtNombreEjecutar').textContent = fila ? fila.dataset.nombre : '';
+            document.getElementById('exec_fecha_picker').limpiarFecha();
+            toggleModal('modalEjecutar', true);
+            return;
         }
 
-        toggleModal('modalVer', true);
-    }
-
-    function abrirModalEjecutar(id, nombre, cedula) {
-        document.getElementById('exec_reporte_id').value = id;
-        document.getElementById('exec_nombre').value = nombre;
-        document.getElementById('exec_cedula').value = cedula;
-        document.getElementById('txtNombreEjecutar').textContent = nombre;
-        toggleModal('modalEjecutar', true);
-    }
-
-    function abrirModalEstatus(id) {
-        document.getElementById('estatus_reporte_id').value = id;
-        toggleModal('modalEstatus', true);
-    }
+        const cierre = e.target.closest('[data-cierre]');
+        if (cierre) {
+            document.getElementById('estatus_reporte_id').value = cierre.dataset.cierre;
+            document.getElementById('estatus_select').value = '';
+            toggleModal('modalEstatus', true);
+        }
+    });
 
     document.getElementById('formEjecutar').addEventListener('submit', async (e) => {
         e.preventDefault();
-        const formData = new FormData(e.target);
-        
-        try {
-            const res = await fetch('app/controllers/procesar_juridico.php', { method: 'POST', body: formData });
-            const data = await res.json();
+        if (!document.getElementById('exec_fecha_valor').value) {
+            showToast('Atención', 'Seleccione la fecha de citación.', 'error');
+            return;
+        }
+        const boton = e.target.querySelector('button[type="submit"]');
+        setBotonCargando(boton, true, 'Guardando...');
+        const datos = await enviarFormulario(URL_PROCESAR, new FormData(e.target));
+        setBotonCargando(boton, false);
 
-            if(data.success) {
-                toggleModal('modalEjecutar', false);
-                showToast('Éxito', data.mensaje, 'success');
-                
-                const urlWord = `plantilla_juridica.php?nombre=${encodeURIComponent(data.nombre)}&cedula=${data.cedula}&fecha=${data.fecha_citacion}`;
-                setTimeout(() => { window.location.href = urlWord; }, 1000);
-                setTimeout(() => { window.location.reload(); }, 2500);
-            } else {
-                showToast('Error', data.mensaje, 'error');
-            }
-        } catch (error) { showToast('Error', 'Fallo de conexión', 'error'); }
+        if (!datos.success) {
+            showToast('Error', datos.mensaje, 'error');
+            return;
+        }
+        toggleModal('modalEjecutar', false);
+        showToast('Éxito', datos.mensaje, 'success');
+        actualizarFila(datos);
+        window.location.href = 'plantilla_juridica.php?id=' + encodeURIComponent(datos.id);
     });
 
     document.getElementById('formEstatus').addEventListener('submit', async (e) => {
         e.preventDefault();
-        const formData = new FormData(e.target);
-        
-        try {
-            const res = await fetch('app/controllers/procesar_juridico.php', { method: 'POST', body: formData });
-            const data = await res.json();
+        const formulario = e.target;
+        const nuevoEstatus = formulario.elements['nuevo_estatus'].value;
+        if (!nuevoEstatus) return;
 
-            if(data.success) {
-                toggleModal('modalEstatus', false);
-                showToast('Actualizado', data.mensaje, 'success');
-                setTimeout(() => { window.location.reload(); }, 1500);
-            } else {
-                showToast('Error', data.mensaje, 'error');
-            }
-        } catch (error) { showToast('Error', 'Fallo de conexión', 'error'); }
+        if (nuevoEstatus === 'terminacion_contrato') {
+            const aceptado = await confirmar({
+                titulo: 'Terminar contrato',
+                mensaje: 'Esta decisión cierra el proceso con terminación de contrato y no se puede deshacer. ¿Desea continuar?',
+                textoBoton: 'Sí, terminar contrato',
+                peligro: true
+            });
+            if (!aceptado) return;
+        }
+
+        const boton = formulario.querySelector('button[type="submit"]');
+        setBotonCargando(boton, true, 'Guardando...');
+        const datos = await enviarFormulario(URL_PROCESAR, new FormData(formulario));
+        setBotonCargando(boton, false);
+
+        if (!datos.success) {
+            showToast('Error', datos.mensaje, 'error');
+            return;
+        }
+        toggleModal('modalEstatus', false);
+        showToast('Actualizado', datos.mensaje, 'success');
+        actualizarFila(datos);
     });
+
+    initFiltros('formFiltrosJuridico', {
+        targets: ['#kpisJuridico', '#tarjetaJuridico'],
+        onUpdate: refrescarTabla
+    });
+
+    lucide.createIcons();
+    refrescarTabla();
+    setInterval(actualizarContadores, 1000);
 </script>
+
+<?php include __DIR__ . '/app/includes/modal_detalle.php'; ?>
 </body>
-</html> 
+</html>

@@ -1,48 +1,57 @@
 <?php
+require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/app/config/config.php';
-auth();
+auth(['normal']);
 
-$causal = $_GET['causal'] ?? 'general';
-$nombre = mb_strtoupper(htmlspecialchars($_GET['nombre'] ?? 'COLABORADOR'), 'UTF-8');
-$cedula = htmlspecialchars($_GET['cedula'] ?? '000000');
+use PhpOffice\PhpWord\TemplateProcessor;
 
-$meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
-$fecha_actual = date('d') . ' de ' . $meses[date('n') - 1] . ' de ' . date('Y');
+$reporte = obtener_reporte_autorizado(filtro_get_int('id'));
 
-$nombre_creador = mb_strtoupper($_SESSION['usuario_nombre'], 'UTF-8');
-$operacion_creador = $_SESSION['operacion_nombre'] ?? 'Central';
-
-$stmt = $conn->prepare("SELECT descripcion FROM reportes_novedades WHERE colaborador_cedula = ? ORDER BY id DESC LIMIT 1");
-$stmt->execute([$cedula]);
-$reporte = $stmt->fetch();
-$descripcion_hechos = $reporte ? nl2br(htmlspecialchars($reporte['descripcion'])) : '';
-
-$protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http";
-$host = $_SERVER['HTTP_HOST'];
-$uri = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
-$base_url = $protocol . "://" . $host . $uri;
-
-$logo_url = $base_url . '/uploads/actas/logo.png';
-$sidebar_url = $base_url . '/uploads/actas/sidebar.png';
-$footer_url = $base_url . '/uploads/actas/footer.png';
-
-// Define $asunto y $contenido según la causal
-require __DIR__ . '/templates/documentos/llamado_atencion_causales.php';
-
-// Compone el $html final con el layout de la carta
-require __DIR__ . '/templates/documentos/layout_carta_word.php';
-
-$directorio_actas = __DIR__ . '/uploads/actas/';
-if (!is_dir($directorio_actas)) {
-    mkdir($directorio_actas, 0777, true);
+if (!$reporte || $reporte['decision'] !== 'llamado_atencion') {
+    http_response_code(404);
+    exit('El llamado de atención no existe o no tiene permisos para descargarlo.');
 }
 
-$nombre_archivo = "Llamado_Atencion_{$cedula}_" . time() . ".doc";
-$ruta_completa = $directorio_actas . $nombre_archivo;
+$causal = $reporte['causal_llamado'] ?? '';
+$meses = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+$fecha_actual = date('d') . ' de ' . $meses[date('n') - 1] . ' de ' . date('Y');
 
-file_put_contents($ruta_completa, $html);
+$asuntos = [
+    'alcoholemia' => 'LLAMADO DE ATENCIÓN POR PRESENTARSE EN ESTADO DE ALCOHOLEMIA',
+    'ausentismo' => 'LLAMADO DE ATENCIÓN POR AUSENCIA INJUSTIFICADA.',
+    'llegar_tarde' => 'LLAMADO DE ATENCIÓN POR LLEGADA TARDE A LABORAR.',
+    'no_acatar_ordenes' => 'LLAMADO DE ATENCIÓN POR NO ACATAR LAS INSTRUCCIONES IMPARTIDAS',
+    'no_marcar' => 'LLAMADO DE ATENCIÓN POR NO MARCACIÓN CONTROL DE INGRESO Y SALIDA (BIOMETRICO)',
+    'bajo_rendimiento' => 'LLAMADO DE ATENCIÓN POR DEFICIENTE RENDIMIENTO EN EL TRABAJO',
+];
 
-header("Content-type: application/vnd.ms-word");
-header("Content-Disposition: attachment;Filename={$nombre_archivo}");
-echo $html;
+try {
+    $plantilla = new TemplateProcessor(__DIR__ . '/plantillas/PLANTILLA_UNIVERSAL.docx');
+    $plantilla->setValue('NOMBRE', mb_strtoupper($reporte['colaborador_nombre'], 'UTF-8'));
+    $plantilla->setValue('CEDULA', $reporte['colaborador_cedula']);
+    $plantilla->setValue('ASUNTO', $asuntos[$causal] ?? 'LLAMADO DE ATENCIÓN DISCIPLINARIO.');
+    $plantilla->setValue('NOMBRE_CREADOR', mb_strtoupper($reporte['creador_nombre'] ?? $_SESSION['usuario_nombre'], 'UTF-8'));
+    $plantilla->setValue('OPERACION_CREADOR', $reporte['operacion_nombre'] ?? '');
+    $plantilla->setValue('FECHA_ACTUAL', $fecha_actual);
+    $plantilla->setValue('DESCRIPCION_HECHOS', $reporte['descripcion']);
+
+    foreach (array_keys(CAUSALES_LLAMADO) as $c) {
+        $plantilla->cloneBlock('block_' . $c, $c === $causal ? 1 : 0, true, false);
+    }
+
+    $ruta = tempnam(sys_get_temp_dir(), 'llamado_');
+    $plantilla->saveAs($ruta);
+} catch (Throwable $e) {
+    error_log('descargar_plantilla: ' . $e->getMessage());
+    http_response_code(500);
+    exit('No se pudo generar la plantilla. Intente nuevamente.');
+}
+
+$nombreArchivo = 'Llamado_Atencion_' . preg_replace('/\D/', '', $reporte['colaborador_cedula']) . '_' . date('Ymd') . '.docx';
+
+header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+header('Content-Disposition: attachment; filename="' . $nombreArchivo . '"');
+header('Content-Length: ' . filesize($ruta));
+readfile($ruta);
+unlink($ruta);
 exit;

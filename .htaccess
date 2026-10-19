@@ -1,0 +1,11 @@
+Options -Indexes
+ServerSignature Off
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(app/(config|includes)|templates|vendor|_legacy|database|plantillas|\.git)(/|$) - [F,L]
+</IfModule>
+
+<FilesMatch "^(composer\.(json|lock)|\.gitignore|\.htaccess|.*\.(sql|md|log|env))$">
+    Require all denied
+</FilesMatch>

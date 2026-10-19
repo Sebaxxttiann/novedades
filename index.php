@@ -1,30 +1,77 @@
 <?php
 require_once __DIR__ . '/app/config/config.php';
-if (isset($_SESSION['usuario_id'])) {
-    header("Location: dashboard.php");
-    exit;
+
+if (sesion_activa()) {
+    redirigir(inicio_por_rol($_SESSION['usuario_rol']));
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    header('Content-Type: application/json');
-    $email = $_POST['email'];
-    $password = $_POST['password'];
+    verificar_csrf();
 
-    $stmt = $conn->prepare("SELECT u.*, o.nombre as operacion_nombre FROM usuarios u LEFT JOIN operaciones o ON u.operacion_id = o.id WHERE u.email = ? AND u.estado = 1");
-    $stmt->execute([$email]);
-    $user = $stmt->fetch();
+    $email = is_string($_POST['email'] ?? null) ? trim($_POST['email']) : '';
+    $password = is_string($_POST['password'] ?? null) ? $_POST['password'] : '';
 
-    if ($user && password_verify($password, $user['password'])) {
-        $_SESSION['usuario_id'] = $user['id'];
-        $_SESSION['usuario_nombre'] = $user['nombre'];
-        $_SESSION['usuario_rol'] = $user['rol'];
-        $_SESSION['operacion_id'] = $user['operacion_id'];
-        $_SESSION['operacion_nombre'] = $user['operacion_nombre'] ?? 'Global';
-        echo json_encode(['success' => true]);
-    } else {
-        echo json_encode(['success' => false, 'mensaje' => 'Credenciales incorrectas o usuario inactivo.']);
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL) || $password === '' || mb_strlen($email) > 150 || strlen($password) > 200) {
+        responder_json(['success' => false, 'mensaje' => 'Correo o contraseña incorrectos.'], 422);
     }
-    exit;
+
+    $claveIp = 'login_ip:' . ip_cliente();
+    $claveEmail = 'login_email:' . mb_strtolower($email);
+
+    if (limite_excedido($claveIp, 20, 900) || limite_excedido($claveEmail, 5, 900)) {
+        responder_json(['success' => false, 'mensaje' => 'Demasiados intentos. Intente de nuevo en 15 minutos.'], 429);
+    }
+
+    try {
+        $stmt = $conn->prepare("SELECT u.id, u.nombre, u.rol, u.operacion_id, u.password, o.nombre AS operacion_nombre
+            FROM usuarios u LEFT JOIN operaciones o ON u.operacion_id = o.id
+            WHERE u.email = ? AND u.estado = 1");
+        $stmt->execute([$email]);
+        $usuario = $stmt->fetch();
+    } catch (Throwable $ex) {
+        error_log('login: ' . $ex->getMessage());
+        responder_json(['success' => false, 'mensaje' => 'No se pudo procesar la solicitud. Intente de nuevo.'], 500);
+    }
+
+    $hashDummy = '$2y$10$O8ReepCemxQtE1iqKgh2Y.Zh7CRwhx36VpHlwht3ICxBlPa0iNPh2';
+    $hash = $usuario ? $usuario['password'] : $hashDummy;
+    $valido = password_verify($password, $hash) && $usuario;
+
+    if (!$valido) {
+        registrar_intento($claveIp);
+        registrar_intento($claveEmail);
+        responder_json(['success' => false, 'mensaje' => 'Correo o contraseña incorrectos.'], 401);
+    }
+
+    limpiar_intentos($claveEmail);
+
+    if (password_needs_rehash($usuario['password'], PASSWORD_DEFAULT)) {
+        try {
+            $conn->prepare("UPDATE usuarios SET password = ? WHERE id = ?")
+                ->execute([password_hash($password, PASSWORD_DEFAULT), $usuario['id']]);
+        } catch (Throwable $ex) {
+            error_log('login rehash: ' . $ex->getMessage());
+        }
+    }
+
+    session_regenerate_id(true);
+    $_SESSION['usuario_id'] = $usuario['id'];
+    $_SESSION['usuario_nombre'] = $usuario['nombre'];
+    $_SESSION['usuario_rol'] = $usuario['rol'];
+    $_SESSION['operacion_id'] = $usuario['operacion_id'];
+    $_SESSION['operacion_nombre'] = $usuario['operacion_nombre'] ?? 'Global';
+    $_SESSION['ultimo_acceso'] = time();
+    unset($_SESSION['csrf_token']);
+    csrf_token();
+
+    responder_json(['success' => true, 'redirect' => inicio_por_rol($usuario['rol'])]);
+}
+
+$aviso = '';
+if (($_GET['expirada'] ?? '') === '1') {
+    $aviso = 'Tu sesión expiró por inactividad. Ingresa de nuevo.';
+} elseif (($_GET['salida'] ?? '') === '1') {
+    $aviso = 'Cerraste sesión correctamente.';
 }
 ?>
 <!DOCTYPE html>
@@ -33,22 +80,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login | Sistema Disciplinario</title>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <script src="https://unpkg.com/lucide@latest"></script>
+    <title>Iniciar sesión | Sistema Disciplinario</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
     <style>
         :root {
             --primary: #2563eb;
             --primary-hover: #1d4ed8;
-            --primary-light: #60a5fa;
-            --navy: #1e3a8a;
             --navy-deep: #0f1f4d;
             --surface: #ffffff;
+            --surface-alt: #f8fafc;
             --text-main: #0f172a;
             --text-muted: #64748b;
             --border: #e2e8f0;
-            --error: #ef4444;
-            --error-bg: #fef2f2;
+            --danger: #b91c1c;
+            --danger-bg: #fef2f2;
+            --danger-border: #fecaca;
+            --info: #1d4ed8;
+            --info-bg: #eff6ff;
+            --info-border: #bfdbfe;
         }
 
         * {
@@ -58,174 +110,150 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-family: 'Poppins', sans-serif;
         }
 
-        html,
-        body {
-            height: 100%;
-        }
-
         body {
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
             padding: 24px;
-            position: relative;
-            overflow: hidden;
-            background: radial-gradient(circle at 15% 20%, #f8f8fa 0%, transparent 45%),
-                radial-gradient(circle at 85% 15%, #f8fafe 0%, transparent 50%),
-                radial-gradient(circle at 50% 100%, #e8e9ed 0%, transparent 60%),
-                linear-gradient(160deg, var(--navy-deep) 0%, var(--navy) 55%, #17296b 100%);
-            background-size: 200% 200%, 200% 200%, 200% 200%, 100% 100%;
-            animation: meshMove 18s ease-in-out infinite;
+            background: #eef2f7;
+            color: var(--text-main);
+            -webkit-font-smoothing: antialiased;
         }
 
-        @keyframes meshMove {
-
-            0%,
-            100% {
-                background-position: 0% 0%, 100% 0%, 50% 100%, 0 0;
-            }
-
-            50% {
-                background-position: 20% 30%, 70% 30%, 60% 80%, 0 0;
-            }
-        }
-
-        /* Rejilla de puntos flotando sobre el fondo, muy sutil */
-        .mesh-grid {
-            position: fixed;
-            inset: 0;
-            background-image: radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px);
-            background-size: 34px 34px;
-            z-index: 0;
-            pointer-events: none;
-        }
-
-
-        @keyframes drift {
-
-            0%,
-            100% {
-                transform: translate(0, 0);
-            }
-
-            50% {
-                transform: translate(60px, -40px);
-            }
-        }
-
-        .stage {
-            position: relative;
-            z-index: 2;
+        .login-card {
             width: 100%;
-            max-width: 420px;
+            max-width: 940px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            background: var(--surface);
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.25);
+        }
+
+        .login-brand {
+            background: linear-gradient(160deg, var(--navy-deep) 0%, var(--primary) 100%);
+            color: #ffffff;
+            padding: 3rem 2.5rem;
             display: flex;
             flex-direction: column;
             align-items: center;
+            justify-content: center;
+            text-align: center;
+            gap: 1.5rem;
         }
 
-        /* Video circular flotante, ancla visual arriba de la tarjeta */
-        .avatar-video {
-            width: 128px;
-            height: 128px;
+        .brand-video {
+            width: 140px;
+            height: 140px;
             border-radius: 50%;
             overflow: hidden;
-            border: 4px solid rgba(255, 255, 255, 0.9);
-            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35), 0 0 0 8px rgba(255, 255, 255, 0.08);
-            margin-bottom: -64px;
-            position: relative;
-            z-index: 3;
-            background: var(--navy);
-            animation: floatSoft 5s ease-in-out infinite;
-            opacity: 0;
-            transform: scale(0.7) translateY(10px);
-            animation: floatSoft 5s ease-in-out infinite, popIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s forwards;
+            border: 3px solid rgba(255, 255, 255, 0.85);
+            background: rgba(255, 255, 255, 0.1);
+            flex-shrink: 0;
         }
 
-        @keyframes popIn {
-            to {
-                opacity: 1;
-                transform: scale(1) translateY(0);
-            }
-        }
-
-        @keyframes floatSoft {
-
-            0%,
-            100% {
-                transform: translateY(0);
-            }
-
-            50% {
-                transform: translateY(-6px);
-            }
-        }
-
-        .avatar-video video {
+        .brand-video video {
             width: 100%;
             height: 100%;
             object-fit: cover;
+            display: block;
         }
 
-        /* Tarjeta glass */
-        .card {
-            width: 100%;
-            background: rgba(255, 255, 255, 0.97);
-            backdrop-filter: blur(20px);
-            border-radius: 28px;
-            padding: 84px 2.75rem 2.75rem;
-            box-shadow: 0 40px 80px -20px rgba(2, 8, 30, 0.55);
-            border: 1px solid rgba(255, 255, 255, 0.5);
-            opacity: 0;
-            transform: translateY(20px);
-            animation: riseIn 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.05s forwards;
-        }
-
-        @keyframes riseIn {
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .status-pill {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 6px;
-            margin-bottom: 1rem;
-        }
-
-        .status-pill .dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: #22c55e;
-            box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.18);
-        }
-
-        .status-pill span.label {
-            font-size: 0.72rem;
+        .brand-title {
+            font-size: 1.45rem;
             font-weight: 600;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: var(--text-muted);
+            line-height: 1.3;
+            letter-spacing: -0.3px;
         }
 
-        .card h1 {
-            text-align: center;
-            font-size: 1.9rem;
-            font-weight: 800;
-            letter-spacing: -0.03em;
-            color: var(--text-main);
-            margin-bottom: 0.4rem;
+        .brand-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.85rem;
+            text-align: left;
+            margin-top: 0.5rem;
         }
 
-        .card>p.subtitle {
-            text-align: center;
+        .brand-list li {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 0.9rem;
+            color: rgba(255, 255, 255, 0.92);
+        }
+
+        .brand-list .icono {
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.14);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .brand-list svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        .login-form-panel {
+            padding: 3rem 2.75rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .login-form-panel h1 {
+            font-size: 1.65rem;
+            font-weight: 600;
+            letter-spacing: -0.4px;
+            margin-bottom: 0.35rem;
+        }
+
+        .subtitle {
             font-size: 0.9rem;
             color: var(--text-muted);
-            margin-bottom: 2rem;
+            margin-bottom: 1.75rem;
+        }
+
+        .mensaje {
+            display: none;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 0.8rem 1rem;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            margin-bottom: 1.2rem;
+            border: 1px solid transparent;
+            line-height: 1.45;
+        }
+
+        .mensaje.visible {
+            display: flex;
+        }
+
+        .mensaje svg {
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        .mensaje.error {
+            background: var(--danger-bg);
+            color: var(--danger);
+            border-color: var(--danger-border);
+        }
+
+        .mensaje.aviso {
+            background: var(--info-bg);
+            color: var(--info);
+            border-color: var(--info-border);
         }
 
         .input-group {
@@ -234,44 +262,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         .input-group label {
             display: block;
-            font-size: 0.78rem;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-            color: var(--text-main);
-            margin-bottom: 7px;
+            font-size: 0.82rem;
+            font-weight: 500;
+            margin-bottom: 6px;
         }
 
         .input-wrapper {
             position: relative;
-            width: 100%;
         }
 
         .input-icon {
             position: absolute;
-            left: 14px;
+            left: 13px;
             top: 50%;
             transform: translateY(-50%);
-            color: var(--text-muted);
             width: 18px;
             height: 18px;
+            color: var(--text-muted);
             pointer-events: none;
-            transition: color 0.2s ease;
         }
 
         .form-control {
             width: 100%;
-            padding: 0.8rem 1rem 0.8rem 2.7rem;
-            border: 1.5px solid var(--border);
-            border-radius: 12px;
+            padding: 0.75rem 1rem 0.75rem 2.6rem;
+            border: 1px solid var(--border);
+            border-radius: 10px;
             font-size: 0.92rem;
             color: var(--text-main);
-            background: #f8fafc;
+            background: var(--surface-alt);
             outline: none;
-            transition: all 0.2s ease;
-        }
-
-        .form-control:hover {
-            border-color: #cbd5e1;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
         }
 
         .form-control:focus {
@@ -280,139 +300,145 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
         }
 
-        .form-control:focus+.input-icon {
-            color: var(--primary);
+        .input-wrapper.con-accion .form-control {
+            padding-right: 2.8rem;
         }
 
-        .form-meta {
-            display: flex;
-            justify-content: flex-end;
-            margin: -0.3rem 0 1.4rem;
-        }
-
-        .form-meta a {
-            font-size: 0.8rem;
-            color: var(--primary);
-            text-decoration: none;
-            font-weight: 500;
-        }
-
-        .form-meta a:hover {
-            text-decoration: underline;
-        }
-
-        .btn-primary {
-            width: 100%;
-            padding: 0.95rem;
-            background: linear-gradient(135deg, var(--primary) 0%, var(--navy-deep) 100%);
-            background-size: 160% 160%;
-            color: white;
+        .btn-ojo {
+            position: absolute;
+            right: 6px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 34px;
+            height: 34px;
             border: none;
-            border-radius: 12px;
-            font-size: 0.96rem;
+            background: transparent;
+            color: var(--text-muted);
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-ojo:hover {
+            color: var(--primary);
+            background: #f1f5f9;
+        }
+
+        .btn-ojo svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        .btn-ingresar {
+            width: 100%;
+            margin-top: 0.5rem;
+            padding: 0.85rem;
+            background: var(--primary);
+            color: #ffffff;
+            border: none;
+            border-radius: 10px;
+            font-size: 0.95rem;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.25s ease, background-position 0.5s ease;
             display: flex;
+            align-items: center;
             justify-content: center;
-            align-items: center;
             gap: 10px;
-            box-shadow: 0 14px 30px -10px rgba(37, 99, 235, 0.6);
+            transition: background-color 0.2s ease;
         }
 
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            background-position: 100% 0%;
-            box-shadow: 0 18px 34px -8px rgba(37, 99, 235, 0.7);
+        .btn-ingresar:hover:not(:disabled) {
+            background: var(--primary-hover);
         }
 
-        .btn-primary:active {
-            transform: translateY(0);
-        }
-
-        .btn-primary:disabled {
+        .btn-ingresar:disabled {
+            opacity: 0.75;
             cursor: not-allowed;
-            opacity: 0.85;
-            transform: none;
         }
 
-        #btnIcon {
-            transition: transform 0.2s ease;
-        }
-
-        .btn-primary:hover #btnIcon {
-            transform: translateX(3px);
-        }
-
-        #error-msg {
-            background: var(--error-bg);
-            color: var(--error);
-            padding: 0.85rem 1rem;
-            border-radius: 12px;
-            font-size: 0.85rem;
-            display: none;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 1.2rem;
-            border: 1px solid #fecaca;
-            animation: shake 0.4s ease;
-        }
-
-        @keyframes shake {
-
-            0%,
-            100% {
-                transform: translateX(0);
-            }
-
-            25% {
-                transform: translateX(-5px);
-            }
-
-            75% {
-                transform: translateX(5px);
-            }
+        .btn-ingresar svg {
+            width: 18px;
+            height: 18px;
         }
 
         .spinner {
             display: none;
             width: 17px;
             height: 17px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
+            border: 2px solid rgba(255, 255, 255, 0.35);
+            border-top-color: #ffffff;
             border-radius: 50%;
-            border-top-color: white;
-            animation: spin 0.8s linear infinite;
+            animation: girar 0.8s linear infinite;
         }
 
-        @keyframes spin {
+        .cargando .spinner {
+            display: block;
+        }
+
+        .cargando .btn-flecha {
+            display: none;
+        }
+
+        @keyframes girar {
             to {
                 transform: rotate(360deg);
             }
         }
 
-        .footer-note {
+        .ayuda {
+            margin-top: 1.5rem;
+            font-size: 0.82rem;
+            color: var(--text-muted);
             text-align: center;
-            margin-top: 1.75rem;
-            font-size: 0.78rem;
-            color: rgba(255, 255, 255, 0.6);
-            position: relative;
-            z-index: 2;
         }
 
-        @media (max-width: 480px) {
-            .card {
-                padding: 76px 1.75rem 2.25rem;
-                border-radius: 22px;
+        @media (max-width: 820px) {
+            body {
+                padding: 16px;
+                align-items: flex-start;
             }
 
-            .avatar-video {
-                width: 108px;
-                height: 108px;
-                margin-bottom: -54px;
+            .login-card {
+                grid-template-columns: 1fr;
+                max-width: 480px;
             }
 
-            .card h1 {
-                font-size: 1.6rem;
+            .login-brand {
+                flex-direction: row;
+                padding: 1.25rem 1.5rem;
+                text-align: left;
+                gap: 1rem;
+            }
+
+            .brand-video {
+                width: 64px;
+                height: 64px;
+                border-width: 2px;
+            }
+
+            .brand-title {
+                font-size: 1.05rem;
+            }
+
+            .brand-list {
+                display: none;
+            }
+
+            .login-form-panel {
+                padding: 2rem 1.5rem;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
             }
         }
     </style>
@@ -420,103 +446,133 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <body>
 
+    <main class="login-card">
+        <section class="login-brand">
+            <div class="brand-video">
+                <video src="uploads/hello.webm" autoplay loop muted playsinline></video>
+            </div>
+            <div>
+                <h2 class="brand-title">Sistema de Gestión de Novedades</h2>
+                <ul class="brand-list">
+                    <li><span class="icono"><i data-lucide="clipboard-list"></i></span>Registro de novedades</li>
+                    <li><span class="icono"><i data-lucide="gavel"></i></span>Seguimiento jurídico</li>
+                    <li><span class="icono"><i data-lucide="bar-chart-3"></i></span>Análisis por operación</li>
+                </ul>
+            </div>
+        </section>
 
+        <section class="login-form-panel">
+            <h1>Iniciar sesión</h1>
+            <p class="subtitle">Ingresa tus credenciales para continuar.</p>
 
-    <div class="stage">
-        <div class="avatar-video">
-            <video src="uploads/hello.webm" autoplay loop muted playsinline></video>
-        </div>
-
-        <div class="card">
-            <div class="status-pill">
-                <span class="dot"></span>
-                <span class="label"></span>
+            <div class="mensaje error" id="cajaError" role="alert">
+                <i data-lucide="alert-circle"></i>
+                <span id="textoError"></span>
             </div>
 
-            <h1>¡HOLAA!</h1>
-            <p class="subtitle">Ingresa tus credenciales para continuar</p>
+            <?php if ($aviso !== ''): ?>
+                <div class="mensaje aviso visible" role="status">
+                    <i data-lucide="info"></i>
+                    <span><?= e($aviso) ?></span>
+                </div>
+            <?php endif; ?>
 
-            <div id="error-msg">
-                <i data-lucide="alert-circle" style="width: 18px; height: 18px; flex-shrink: 0;"></i>
-                <span id="error-text"></span>
-            </div>
+            <form id="loginForm" novalidate>
+                <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
 
-            <form id="loginForm">
                 <div class="input-group">
-                    <label>Correo Electrónico</label>
+                    <label for="email">Correo electrónico</label>
                     <div class="input-wrapper">
-                        <input type="email" name="email" class="form-control" required placeholder="correo@empresa.com">
+                        <input type="email" id="email" name="email" class="form-control" required autofocus autocomplete="username" placeholder="correo@empresa.com">
                         <i data-lucide="mail" class="input-icon"></i>
                     </div>
                 </div>
 
                 <div class="input-group">
-                    <label>Contraseña</label>
-                    <div class="input-wrapper">
-                        <input type="password" name="password" class="form-control" required placeholder="••••••••">
+                    <label for="password">Contraseña</label>
+                    <div class="input-wrapper con-accion">
+                        <input type="password" id="password" name="password" class="form-control" required autocomplete="current-password" placeholder="Tu contraseña">
                         <i data-lucide="lock" class="input-icon"></i>
+                        <button type="button" class="btn-ojo" id="btnOjo" aria-label="Mostrar u ocultar contraseña"><i data-lucide="eye"></i></button>
                     </div>
                 </div>
 
-                <div class="form-meta">
-                    <a href="#">¿Olvidaste tu contraseña?</a>
-                </div>
-
-                <button type="submit" class="btn-primary" id="submitBtn">
-                    <span id="btnText">Ingresar al sistema</span>
-                    <i data-lucide="arrow-right" id="btnIcon" style="width: 18px;"></i>
-                    <div class="spinner" id="btnSpinner"></div>
+                <button type="submit" class="btn-ingresar" id="btnIngresar">
+                    <span id="btnTexto">Ingresar al sistema</span>
+                    <i data-lucide="arrow-right" class="btn-flecha"></i>
+                    <span class="spinner"></span>
                 </button>
             </form>
-        </div>
 
-        <p class="footer-note">Sistema de Gestión de Novedades y Operaciones</p>
-    </div>
+            <p class="ayuda">¿Olvidaste tu contraseña? Contacta al administrador.</p>
+        </section>
+    </main>
 
     <script>
+        try {
+            localStorage.removeItem('actass_ultima_actividad');
+            sessionStorage.removeItem('actass_loader_visto');
+        } catch (e) {}
+
         lucide.createIcons();
 
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+        const form = document.getElementById('loginForm');
+        const cajaError = document.getElementById('cajaError');
+        const textoError = document.getElementById('textoError');
+        const btnIngresar = document.getElementById('btnIngresar');
+        const btnTexto = document.getElementById('btnTexto');
+        const inputPassword = document.getElementById('password');
+        const btnOjo = document.getElementById('btnOjo');
+
+        btnOjo.addEventListener('click', () => {
+            const visible = inputPassword.type === 'text';
+            inputPassword.type = visible ? 'password' : 'text';
+            btnOjo.innerHTML = `<i data-lucide="${visible ? 'eye' : 'eye-off'}"></i>`;
+            lucide.createIcons({ nodes: [btnOjo] });
+        });
+
+        function mostrarError(mensaje) {
+            textoError.textContent = mensaje;
+            cajaError.classList.add('visible');
+        }
+
+        function setCargando(cargando) {
+            btnIngresar.disabled = cargando;
+            btnIngresar.classList.toggle('cargando', cargando);
+            btnTexto.textContent = cargando ? 'Verificando...' : 'Ingresar al sistema';
+        }
+
+        form.addEventListener('submit', async (e) => {
             e.preventDefault();
+            cajaError.classList.remove('visible');
 
-            const errBox = document.getElementById('error-msg');
-            const errText = document.getElementById('error-text');
-            const submitBtn = document.getElementById('submitBtn');
-            const btnText = document.getElementById('btnText');
-            const btnIcon = document.getElementById('btnIcon');
-            const btnSpinner = document.getElementById('btnSpinner');
+            if (!form.email.value.trim() || !inputPassword.value) {
+                mostrarError('Ingresa tu correo y tu contraseña.');
+                return;
+            }
 
-            errBox.style.display = 'none';
-            submitBtn.disabled = true;
-            btnText.textContent = 'Verificando...';
-            btnIcon.style.display = 'none';
-            btnSpinner.style.display = 'block';
+            setCargando(true);
 
             try {
                 const res = await fetch('index.php', {
                     method: 'POST',
-                    body: new FormData(e.target)
+                    body: new FormData(form),
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                    credentials: 'same-origin'
                 });
-                const data = await res.json();
+                const data = await res.json().catch(() => ({ success: false, mensaje: 'Respuesta inesperada del servidor.' }));
 
                 if (data.success) {
-                    btnText.textContent = 'Redirigiendo...';
-                    window.location.href = 'dashboard.php';
-                } else {
-                    submitBtn.disabled = false;
-                    btnText.textContent = 'Ingresar al sistema';
-                    btnIcon.style.display = 'block';
-                    btnSpinner.style.display = 'none';
-                    errText.textContent = data.mensaje;
-                    errBox.style.display = 'flex';
+                    btnTexto.textContent = 'Redirigiendo...';
+                    window.location.href = data.redirect || 'dashboard.php';
+                    return;
                 }
+
+                setCargando(false);
+                mostrarError(data.mensaje || 'No se pudo iniciar sesión.');
             } catch (error) {
-                submitBtn.disabled = false;
-                btnText.textContent = 'Ingresar al sistema';
-                btnIcon.style.display = 'block';
-                btnSpinner.style.display = 'none';
-                errText.textContent = "Ocurrió un error de conexión.";
-                errBox.style.display = 'flex';
+                setCargando(false);
+                mostrarError('Ocurrió un error de conexión.');
             }
         });
     </script>

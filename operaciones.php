@@ -1,302 +1,380 @@
 <?php
 require_once __DIR__ . '/app/config/config.php';
-auth();
+auth(['admin']);
 
-if ($_SESSION['usuario_rol'] !== 'admin') {
-    header("Location: dashboard.php");
-    exit;
+const OPERACION_SELECT = "SELECT o.id, o.nombre, o.creado_en,
+    (SELECT COUNT(*) FROM usuarios u WHERE u.operacion_id = o.id) AS usuarios,
+    (SELECT COUNT(*) FROM headcount h WHERE h.operacion_id = o.id) AS colaboradores,
+    (SELECT COUNT(*) FROM reportes_novedades r WHERE r.operacion_id = o.id) AS novedades
+    FROM operaciones o";
+
+function obtener_operacion(PDO $conn, int $id): ?array
+{
+    $stmt = $conn->prepare(OPERACION_SELECT . " WHERE o.id = ?");
+    $stmt->execute([$id]);
+    $op = $stmt->fetch();
+    if (!$op) {
+        return null;
+    }
+    foreach (['id', 'usuarios', 'colaboradores', 'novedades'] as $campo) {
+        $op[$campo] = (int) $op[$campo];
+    }
+    return $op;
+}
+
+function fallo(string $mensaje, int $status = 200): never
+{
+    responder_json(['success' => false, 'mensaje' => $mensaje], $status);
+}
+
+function texto_post(string $clave): string
+{
+    $valor = $_POST[$clave] ?? '';
+    return is_string($valor) ? trim($valor) : '';
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    header('Content-Type: application/json');
-    $nombre = trim($_POST['nombre']);
+    limitar('operaciones:' . $_SESSION['usuario_id'], 30, 60);
 
-    if (empty($nombre)) {
-        echo json_encode(['success' => false, 'mensaje' => 'El nombre no puede estar vacío']);
-        exit;
-    }
+    $accion = texto_post('accion');
 
     try {
-        $stmt = $conn->prepare("INSERT INTO operaciones (nombre) VALUES (?)");
-        $stmt->execute([$nombre]);
-        echo json_encode(['success' => true, 'mensaje' => 'Operación creada correctamente']);
-    } catch (Exception $e) {
-        echo json_encode(['success' => false, 'mensaje' => 'Error al crear la operación o nombre duplicado']);
+        if ($accion === 'crear' || $accion === 'editar') {
+            $editando = $accion === 'editar';
+            $id = (int) texto_post('id');
+            $nombre = texto_post('nombre');
+
+            if ($editando && !obtener_operacion($conn, $id)) {
+                fallo('La operación no existe.');
+            }
+            if ($nombre === '') {
+                fallo('El nombre de la operación es obligatorio.');
+            }
+            if (mb_strlen($nombre, 'UTF-8') > 100) {
+                fallo('El nombre no puede superar los 100 caracteres.');
+            }
+
+            $stmt = $conn->prepare("SELECT COUNT(*) FROM operaciones WHERE nombre = ? AND id <> ?");
+            $stmt->execute([$nombre, $editando ? $id : 0]);
+            if ((int) $stmt->fetchColumn() > 0) {
+                fallo('Ya existe una operación con ese nombre. Use un nombre diferente.');
+            }
+
+            try {
+                if ($editando) {
+                    $conn->prepare("UPDATE operaciones SET nombre = ? WHERE id = ?")->execute([$nombre, $id]);
+                } else {
+                    $conn->prepare("INSERT INTO operaciones (nombre) VALUES (?)")->execute([$nombre]);
+                    $id = (int) $conn->lastInsertId();
+                }
+            } catch (PDOException $e) {
+                if ($e->getCode() === '23000') {
+                    fallo('Ya existe una operación con ese nombre. Use un nombre diferente.');
+                }
+                throw $e;
+            }
+
+            responder_json([
+                'success' => true,
+                'mensaje' => $editando ? 'Operación actualizada correctamente.' : 'Operación creada correctamente.',
+                'operacion' => obtener_operacion($conn, $id),
+            ]);
+        }
+
+        if ($accion === 'eliminar') {
+            $id = (int) texto_post('id');
+            $op = obtener_operacion($conn, $id);
+            if (!$op) {
+                fallo('La operación no existe.');
+            }
+
+            $bloqueos = [];
+            if ($op['usuarios'] > 0) {
+                $bloqueos[] = $op['usuarios'] . ($op['usuarios'] === 1 ? ' usuario' : ' usuarios');
+            }
+            if ($op['colaboradores'] > 0) {
+                $bloqueos[] = $op['colaboradores'] . ($op['colaboradores'] === 1 ? ' colaborador en headcount' : ' colaboradores en headcount');
+            }
+            if ($op['novedades'] > 0) {
+                $bloqueos[] = $op['novedades'] . ($op['novedades'] === 1 ? ' novedad' : ' novedades');
+            }
+            if ($bloqueos) {
+                fallo('No se puede eliminar la operación porque tiene asociados: ' . implode(', ', $bloqueos) . '.');
+            }
+
+            $conn->prepare("DELETE FROM operaciones WHERE id = ?")->execute([$id]);
+            responder_json(['success' => true, 'id' => $id, 'mensaje' => 'Operación eliminada correctamente.']);
+        }
+
+        fallo('Acción no válida.', 400);
+    } catch (Throwable $e) {
+        error_log('operaciones.php: ' . $e->getMessage());
+        fallo('No se pudo completar la operación. Intente de nuevo.', 500);
     }
-    exit;
 }
 
-$operaciones = $conn->query("SELECT * FROM operaciones ORDER BY id DESC")->fetchAll();
+$fq = filtro_get('q');
+$where = '';
+$params = [];
+if ($fq !== '') {
+    $where = " WHERE o.nombre LIKE ?";
+    $params[] = '%' . addcslashes($fq, '%_\\') . '%';
+}
+$stmt = $conn->prepare(OPERACION_SELECT . $where . " ORDER BY o.id DESC");
+$stmt->execute($params);
+$operaciones = $stmt->fetchAll();
 
+$tituloPagina = 'Operaciones';
 include __DIR__ . '/app/includes/header.php';
 ?>
 
-<style>
-    /* Estilos específicos compartidos para la interfaz Enterprise */
-    .page-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 2rem;
-    }
-
-    .page-title h1 {
-        font-size: 1.6rem;
-        font-weight: 600;
-        color: var(--text-main);
-        letter-spacing: -0.5px;
-    }
-
-    .page-title p {
-        color: var(--text-muted);
-        font-size: 0.9rem;
-        margin-top: 2px;
-    }
-
-    /* Tabla Enterprise - Corregida para ocupar el 100% */
-    .table-card {
-        background: var(--surface);
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        box-shadow: var(--shadow-sm);
-        overflow: hidden;
-        width: 100%; /* Asegura que tome todo el espacio disponible */
-    }
-
-    .custom-table {
-        width: 100%;
-        border-collapse: collapse;
-        text-align: left;
-    }
-
-    .custom-table th {
-        background: #f8fafc;
-        padding: 1rem 1.2rem;
-        font-size: 0.8rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        color: var(--text-muted);
-        border-bottom: 1px solid var(--border);
-    }
-
-    .custom-table td {
-        padding: 1rem 1.2rem;
-        border-bottom: 1px solid var(--border);
-        font-size: 0.95rem;
-        vertical-align: middle;
-    }
-
-    .custom-table tbody tr:last-child td {
-        border-bottom: none;
-    }
-
-    .custom-table tbody tr {
-        transition: background-color 0.2s ease;
-    }
-
-    .custom-table tbody tr:hover {
-        background-color: #f8fafc;
-    }
-
-    /* Elementos visuales de la tabla */
-    .id-badge {
-        background: #f1f5f9;
-        color: #475569;
-        padding: 0.3rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        font-family: monospace;
-    }
-
-    .op-name {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        font-weight: 600;
-        color: var(--text-main);
-    }
-
-    .op-icon {
-        width: 32px;
-        height: 32px;
-        border-radius: 8px;
-        background: #eff6ff;
-        color: var(--primary);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .date-cell {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        color: var(--text-muted);
-        font-size: 0.9rem;
-    }
-
-    /* Estado Vacío */
-    .empty-state {
-        padding: 4rem 2rem;
-        text-align: center;
-        color: var(--text-muted);
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 12px;
-    }
-
-    .empty-state-icon {
-        width: 48px;
-        height: 48px;
-        color: #cbd5e1;
-        margin-bottom: 8px;
-    }
-
-    .info-text {
-        display: flex;
-        align-items: flex-start;
-        gap: 8px;
-        background: #f8fafc;
-        padding: 12px;
-        border-radius: 8px;
-        border: 1px solid #e2e8f0;
-        margin-top: 15px;
-    }
-</style>
-
-<div class="container">
-    <!-- Header de Sección -->
+<main class="container">
     <div class="page-header">
         <div class="page-title">
             <h1>Gestión de Operaciones</h1>
             <p>Administre las sedes, ciudades o áreas operativas del sistema.</p>
         </div>
-        <button class="btn btn-primary" onclick="toggleModal('modalOperacion', true)">
-            <i data-lucide="map-pin-plus" style="width: 18px;"></i> Nueva Operación
+        <div class="header-actions">
+            <button type="button" class="btn btn-primary" id="btnNuevaOperacion">
+                <i data-lucide="plus" style="width: 18px; height: 18px;"></i> Nueva operación
+            </button>
+        </div>
+    </div>
+
+    <form class="filters-bar" id="formFiltros" method="get" action="operaciones.php">
+        <div class="filter-field grow">
+            <label for="filtroQ">Buscar</label>
+            <div class="search-input">
+                <i data-lucide="search"></i>
+                <input type="search" class="form-control" id="filtroQ" name="q" value="<?= e($fq) ?>" placeholder="Nombre de la operación" autocomplete="off">
+            </div>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" data-filtro-limpiar>
+            <i data-lucide="x" style="width: 14px; height: 14px;"></i> Limpiar
         </button>
-    </div>
+    </form>
 
-    <!-- Tabla de Operaciones -->
-    <div class="table-card">
-        <table class="custom-table">
-            <thead>
-                <tr>
-                    <th style="width: 150px;">ID Ref.</th>
-                    <th>Nombre de la Operación (Ciudad/Sede)</th>
-                    <th>Fecha de Creación</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($operaciones as $op): ?>
+    <div class="table-card" id="operacionesCard">
+        <div class="table-scroll">
+            <table class="custom-table" id="tablaOperaciones">
+                <thead>
                     <tr>
-                        <td>
-                            <span class="id-badge">#<?= str_pad($op['id'], 4, '0', STR_PAD_LEFT) ?></span>
-                        </td>
-                        <td>
-                            <div class="op-name">
-                                <div class="op-icon">
-                                    <i data-lucide="building-2" style="width: 16px; height: 16px;"></i>
+                        <th>ID Ref.</th>
+                        <th>Nombre</th>
+                        <th style="text-align: center;">Usuarios</th>
+                        <th style="text-align: center;">Colaboradores</th>
+                        <th style="text-align: center;">Novedades</th>
+                        <th>Fecha de creación</th>
+                        <th class="col-actions">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($operaciones as $op): ?>
+                        <?php
+                        $datos = [
+                            'id' => (int) $op['id'],
+                            'nombre' => $op['nombre'],
+                            'usuarios' => (int) $op['usuarios'],
+                            'colaboradores' => (int) $op['colaboradores'],
+                            'novedades' => (int) $op['novedades'],
+                            'creado_en' => $op['creado_en'],
+                        ];
+                        ?>
+                        <tr data-id="<?= (int) $op['id'] ?>">
+                            <td><span class="id-badge">#<?= e(str_pad((string) $op['id'], 4, '0', STR_PAD_LEFT)) ?></span></td>
+                            <td class="nowrap"><strong><?= e($op['nombre']) ?></strong></td>
+                            <td style="text-align: center;"><?= (int) $op['usuarios'] ?></td>
+                            <td style="text-align: center;"><?= (int) $op['colaboradores'] ?></td>
+                            <td style="text-align: center;"><?= (int) $op['novedades'] ?></td>
+                            <td>
+                                <span class="date-cell">
+                                    <i data-lucide="calendar"></i>
+                                    <?= e(date('d/m/Y', strtotime($op['creado_en']))) ?>
+                                </span>
+                            </td>
+                            <td class="col-actions">
+                                <div class="row-actions">
+                                    <button type="button" class="btn-icon" title="Editar" aria-label="Editar" data-editar-operacion="<?= e(json_encode($datos, JSON_UNESCAPED_UNICODE)) ?>">
+                                        <i data-lucide="pencil"></i>
+                                    </button>
+                                    <button type="button" class="btn-icon danger" title="Eliminar" aria-label="Eliminar" data-eliminar-operacion="<?= e(json_encode($datos, JSON_UNESCAPED_UNICODE)) ?>">
+                                        <i data-lucide="trash-2"></i>
+                                    </button>
                                 </div>
-                                <?= htmlspecialchars($op['nombre']) ?>
-                            </div>
-                        </td>
-                        <td>
-                            <div class="date-cell">
-                                <i data-lucide="calendar" style="width: 14px; height: 14px;"></i>
-                                <?= date('d/m/Y', strtotime($op['creado_en'])) ?>
-                            </div>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-                
-                <?php if (empty($operaciones)): ?>
-                    <tr>
-                        <td colspan="3">
-                            <div class="empty-state">
-                                <i data-lucide="map-x" class="empty-state-icon"></i>
-                                <h3>No hay operaciones registradas</h3>
-                                <p>Haga clic en "Nueva Operación" para registrar su primera sede.</p>
-                            </div>
-                        </td>
-                    </tr>
-                <?php endif; ?>
-            </tbody>
-        </table>
-    </div>
-</div>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
 
-<!-- Modal Crear Operación -->
+                    <?php if (empty($operaciones)): ?>
+                        <tr data-no-paginate="true">
+                            <td colspan="7">
+                                <div class="empty-state">
+                                    <i data-lucide="map-pin-off"></i>
+                                    <h3>No se encontraron operaciones</h3>
+                                    <p>Ajuste la búsqueda o cree una nueva operación.</p>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</main>
+
 <div class="modal-overlay" id="modalOperacion">
     <div class="modal-content" style="max-width: 480px;">
-        <form id="formOperacion">
+        <form id="formOperacion" autocomplete="off">
+            <input type="hidden" name="accion" id="operacionAccion" value="crear">
+            <input type="hidden" name="id" id="operacionId" value="">
+
             <div class="modal-header">
-                <h2>Nueva Operación</h2>
-                <button type="button" class="close-modal" onclick="toggleModal('modalOperacion', false)">
-                    <i data-lucide="x" style="width: 20px;"></i>
+                <h2 id="operacionTitulo">Nueva operación</h2>
+                <button type="button" class="close-modal" aria-label="Cerrar" onclick="toggleModal('modalOperacion', false)">
+                    <i data-lucide="x" style="width: 20px; height: 20px;"></i>
                 </button>
             </div>
 
             <div class="modal-body">
                 <div class="form-group">
-                    <label class="form-label">Nombre de la Sede o Ciudad</label>
-                    <input type="text" name="nombre" class="form-control" required placeholder="Ej: Medellín, Bogotá Sur, Centro Logístico...">
+                    <label class="form-label" for="operacionNombre">Nombre de la sede o ciudad</label>
+                    <input type="text" name="nombre" id="operacionNombre" class="form-control" required maxlength="100" placeholder="Ej: Medellín, Bogotá Sur, Centro Logístico">
                 </div>
-                
+
                 <div class="info-text">
-                    <i data-lucide="info" style="width: 18px; height: 18px; color: var(--primary); flex-shrink: 0; margin-top: 2px;"></i>
-                    <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0; line-height: 1.4;">
-                        Al crear esta operación, estará disponible de inmediato en el selector al registrar o editar usuarios en el sistema.
-                    </p>
+                    <i data-lucide="info"></i>
+                    <p>La operación estará disponible de inmediato al registrar o editar usuarios del sistema.</p>
                 </div>
             </div>
 
             <div class="modal-footer">
                 <button type="button" class="btn btn-ghost" onclick="toggleModal('modalOperacion', false)">Cancelar</button>
-                <button type="submit" class="btn btn-primary" id="btnGuardarOp">
-                    <span id="txtGuardarOp">Guardar Operación</span>
-                </button>
+                <button type="submit" class="btn btn-primary" id="btnGuardarOperacion">Guardar operación</button>
             </div>
         </form>
     </div>
 </div>
 
 <script>
-    lucide.createIcons();
+    const formOperacion = document.getElementById('formOperacion');
 
-    document.getElementById('formOperacion').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        
-        const btnGuardar = document.getElementById('btnGuardarOp');
-        const txtGuardar = document.getElementById('txtGuardarOp');
-        
-        // Estado de carga
-        btnGuardar.disabled = true;
-        txtGuardar.textContent = 'Guardando...';
+    function refrescarTabla() {
+        lucide.createIcons();
+        initPagination('tablaOperaciones', { perPage: 10 });
+    }
 
-        try {
-            const res = await fetch('operaciones.php', {
-                method: 'POST',
-                body: new FormData(e.target)
-            });
-            const data = await res.json();
+    function abrirModalOperacion(op) {
+        const editando = !!op;
+        formOperacion.reset();
+        document.getElementById('operacionAccion').value = editando ? 'editar' : 'crear';
+        document.getElementById('operacionId').value = editando ? op.id : '';
+        document.getElementById('operacionTitulo').textContent = editando ? 'Editar operación' : 'Nueva operación';
+        document.getElementById('btnGuardarOperacion').textContent = editando ? 'Guardar cambios' : 'Guardar operación';
+        if (editando) document.getElementById('operacionNombre').value = op.nombre;
+        toggleModal('modalOperacion', true);
+    }
 
-            if (data.success) {
-                toggleModal('modalOperacion', false);
-                showToast('Operación Exitosa', data.mensaje, 'success');
-                setTimeout(() => window.location.reload(), 1200);
-            } else {
-                showToast('Atención', data.mensaje, 'error');
-                btnGuardar.disabled = false;
-                txtGuardar.textContent = 'Guardar Operación';
-            }
-        } catch (error) {
-            showToast('Error', 'No se pudo conectar con el servidor.', 'error');
-            btnGuardar.disabled = false;
-            txtGuardar.textContent = 'Guardar Operación';
+    function filaOperacionHtml(op) {
+        const fecha = new Date(String(op.creado_en).replace(' ', 'T')).toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const datos = escapeHtml(JSON.stringify(op));
+        return `
+            <td><span class="id-badge">#${String(op.id).padStart(4, '0')}</span></td>
+            <td class="nowrap"><strong>${escapeHtml(op.nombre)}</strong></td>
+            <td style="text-align: center;">${Number(op.usuarios)}</td>
+            <td style="text-align: center;">${Number(op.colaboradores)}</td>
+            <td style="text-align: center;">${Number(op.novedades)}</td>
+            <td><span class="date-cell"><i data-lucide="calendar"></i> ${escapeHtml(fecha)}</span></td>
+            <td class="col-actions">
+                <div class="row-actions">
+                    <button type="button" class="btn-icon" title="Editar" aria-label="Editar" data-editar-operacion="${datos}"><i data-lucide="pencil"></i></button>
+                    <button type="button" class="btn-icon danger" title="Eliminar" aria-label="Eliminar" data-eliminar-operacion="${datos}"><i data-lucide="trash-2"></i></button>
+                </div>
+            </td>`;
+    }
+
+    function pintarFilaOperacion(op) {
+        const tbody = document.querySelector('#tablaOperaciones tbody');
+        const vacia = tbody.querySelector('tr[data-no-paginate]');
+        if (vacia) vacia.remove();
+        let tr = tbody.querySelector(`tr[data-id="${op.id}"]`);
+        if (tr) {
+            tr.innerHTML = filaOperacionHtml(op);
+        } else {
+            tr = document.createElement('tr');
+            tr.dataset.id = op.id;
+            tr.innerHTML = filaOperacionHtml(op);
+            tbody.prepend(tr);
         }
+        refrescarTabla();
+    }
+
+    function quitarFilaOperacion(id) {
+        const tbody = document.querySelector('#tablaOperaciones tbody');
+        const tr = tbody.querySelector(`tr[data-id="${id}"]`);
+        if (tr) tr.remove();
+        if (!tbody.querySelector('tr')) {
+            tbody.innerHTML = '<tr data-no-paginate="true"><td colspan="7"><div class="empty-state"><i data-lucide="map-pin-off"></i><h3>No se encontraron operaciones</h3><p>Ajuste la búsqueda o cree una nueva operación.</p></div></td></tr>';
+        }
+        refrescarTabla();
+    }
+
+    lucide.createIcons();
+    initPagination('tablaOperaciones', { perPage: 10 });
+    initFiltros('formFiltros', { targets: ['#operacionesCard'], onUpdate: () => initPagination('tablaOperaciones', { perPage: 10 }) });
+
+    document.getElementById('btnNuevaOperacion').addEventListener('click', () => abrirModalOperacion(null));
+
+    document.addEventListener('click', async (ev) => {
+        const btnEditar = ev.target.closest('[data-editar-operacion]');
+        if (btnEditar) {
+            abrirModalOperacion(JSON.parse(btnEditar.dataset.editarOperacion));
+            return;
+        }
+
+        const btnEliminar = ev.target.closest('[data-eliminar-operacion]');
+        if (!btnEliminar) return;
+        const op = JSON.parse(btnEliminar.dataset.eliminarOperacion);
+
+        const ok = await confirmar({
+            titulo: 'Eliminar operación',
+            mensaje: `Se eliminará la operación "${op.nombre}". Esta acción no se puede deshacer.`,
+            textoBoton: 'Eliminar',
+            peligro: true
+        });
+        if (!ok) return;
+
+        const datos = new FormData();
+        datos.append('accion', 'eliminar');
+        datos.append('id', op.id);
+        btnEliminar.disabled = true;
+        const data = await enviarFormulario('operaciones.php', datos);
+        btnEliminar.disabled = false;
+
+        if (!data.success) {
+            showToast('No se pudo eliminar', data.mensaje, 'error');
+            return;
+        }
+        quitarFilaOperacion(data.id);
+        showToast('Operación eliminada', data.mensaje, 'success');
+    });
+
+    formOperacion.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const boton = document.getElementById('btnGuardarOperacion');
+        const editando = document.getElementById('operacionAccion').value === 'editar';
+
+        setBotonCargando(boton, true, 'Guardando...');
+        const data = await enviarFormulario('operaciones.php', new FormData(formOperacion));
+        setBotonCargando(boton, false);
+
+        if (!data.success) {
+            showToast('Atención', data.mensaje, 'error');
+            return;
+        }
+
+        toggleModal('modalOperacion', false);
+        pintarFilaOperacion(data.operacion);
+        showToast(editando ? 'Operación actualizada' : 'Operación creada', data.mensaje, 'success');
     });
 </script>
 </body>

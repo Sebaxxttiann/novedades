@@ -2,3 +2,11 @@
 *.log
 Thumbs.db
 .DS_Store
+/uploads/*.jpg
+/uploads/*.jpeg
+/uploads/*.png
+/uploads/*.gif
+/uploads/*.webp
+/uploads/*.heic
+/uploads/*.pdf
+/uploads/actas/Llamado_*
